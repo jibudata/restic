@@ -31,7 +31,7 @@ type Config struct {
 func NewConfig() Config {
 	return Config{
 		Connections:   5,
-		ListObjectsV1: false,
+		ListObjectsV1: true,
 	}
 }
 
