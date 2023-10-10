@@ -1,6 +1,8 @@
 package restorer
 
 import (
+	"fmt"
+
 	"github.com/restic/restic/internal/restic"
 	"github.com/restic/restic/internal/walker"
 
@@ -9,7 +11,7 @@ import (
 	"path/filepath"
 )
 
-func DeleteFiles(ctx context.Context, target string, host string, paths []string, tags []restic.TagList, repo restic.Repository, id restic.ID) error {
+func DeleteFiles(ctx context.Context, target string, paths []string, tags []restic.TagList, repo restic.Repository, id restic.ID) error {
 
 	var restorefiles, targetfiles, deletefiles []string
 
@@ -58,6 +60,7 @@ func DeleteFiles(ctx context.Context, target string, host string, paths []string
 	}
 
 	for _, deletefile := range deletefiles {
+		fmt.Printf("delete file %s\n", deletefile)
 		os.RemoveAll(deletefile)
 	}
 

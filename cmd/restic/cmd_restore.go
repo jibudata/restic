@@ -204,7 +204,7 @@ func runRestore(opts RestoreOptions, gopts GlobalOptions, args []string) error {
 		if err != nil {
 			return err
 		}
-		err = restorer.DeleteFiles(ctx, opts.Target, opts.Host, opts.Paths, opts.Tags, repo, id)
+		err = restorer.DeleteFiles(ctx, opts.Target, opts.Paths, opts.Tags, repo, id)
 		if err != nil {
 			Warnf("Could not delete file in target: %v", err)
 		}
