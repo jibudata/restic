@@ -10,11 +10,11 @@ import (
 	"github.com/restic/restic/internal/debug"
 )
 
-const (
-	CheckpointStateInProgress = "in-progress"
-	CheckpointStateFailed     = "failed"
-	CheckpointStateCompleted  = "completed"
-)
+//const (
+//	CheckpointStateInProgress = "in-progress"
+//	CheckpointStateFailed     = "failed"
+//	CheckpointStateCompleted  = "completed"
+//)
 
 // Checkpoint is the state of a restored resource at one point in time.
 // Checkpoint.Snapshot is a state of saving tree blobs
@@ -48,6 +48,7 @@ func NewCheckpoint(oid *ID) *Checkpoint {
 func LoadCheckpoint(ctx context.Context, repo Repository, id ID) (*Checkpoint, error) {
 	cp := &Checkpoint{id: &id}
 	err := repo.LoadJSONUnpacked(ctx, CheckpointFile, id, cp)
+	debug.Log("load checkpoint %v", err)
 	if err != nil {
 		return nil, err
 	}
@@ -70,6 +71,7 @@ func ForAllCheckpoints(ctx context.Context, repo Repository, excludeIDs IDSet, f
 	wg.Go(func() error {
 		defer close(ch)
 		return repo.List(ctx, CheckpointFile, func(id ID, size int64) error {
+			debug.Log("list checkpoint %v", id)
 			if excludeIDs.Has(id) {
 				return nil
 			}
@@ -116,18 +118,6 @@ func (sn Checkpoint) String() string {
 func (sn Checkpoint) ID() *ID {
 	return sn.id
 }
-
-//func (sn *Checkpoint) fillUserInfo() error {
-//	usr, err := user.Current()
-//	if err != nil {
-//		return nil
-//	}
-//	sn.Username = usr.Username
-//
-//	// set userid and groupid
-//	sn.UID, sn.GID, err = uidGidInt(*usr)
-//	return err
-//}
 
 // AddTags adds the given tags to the checkpoint tags, preventing duplicates.
 // It returns true if any changes were made.

@@ -76,7 +76,7 @@ func FindLatestCheckpoint(ctx context.Context, repo Repository, targets []string
 
 // FindCheckpoint takes a string and tries to find a checkpoint whose ID matches
 // the string as closely as possible.
-func FindCheckPoints(ctx context.Context, repo Repository, s string) (ID, error) {
+func FindCheckpoint(ctx context.Context, repo Repository, s string) (ID, error) {
 	// find snapshot id with prefix
 	name, err := Find(ctx, repo.Backend(), CheckpointFile, s)
 	if err != nil {
@@ -86,8 +86,8 @@ func FindCheckPoints(ctx context.Context, repo Repository, s string) (ID, error)
 	return ParseID(name)
 }
 
-// Implement FindFilteredCheckPoints function which is similar to FindFilteredSnapshots
-func FindFilteredCheckPoints(ctx context.Context, repo Repository, hosts []string, tags []TagList, paths []string) (Checkpoints, error) {
+// Implement FindFilteredCheckpoints function which is similar to FindFilteredSnapshots
+func FindFilteredCheckpoints(ctx context.Context, repo Repository, hosts []string, tags []TagList, paths []string) (Checkpoints, error) {
 	results := make(Checkpoints, 0, 20)
 
 	err := ForAllCheckpoints(ctx, repo, nil, func(id ID, cp *Checkpoint, err error) error {

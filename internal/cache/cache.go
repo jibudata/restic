@@ -46,9 +46,10 @@ func readVersion(dir string) (v uint, err error) {
 const cacheVersion = 1
 
 var cacheLayoutPaths = map[restic.FileType]string{
-	restic.PackFile:     "data",
-	restic.SnapshotFile: "snapshots",
-	restic.IndexFile:    "index",
+	restic.PackFile:       "data",
+	restic.SnapshotFile:   "snapshots",
+	restic.CheckpointFile: "checkpoints",
+	restic.IndexFile:      "index",
 }
 
 const cachedirTagSignature = "Signature: 8a477f597d28d172789f06886806bc55\n"
