@@ -45,7 +45,7 @@ func (b *Backend) Remove(ctx context.Context, h restic.Handle) error {
 
 func autoCacheTypes(h restic.Handle) bool {
 	switch h.Type {
-	case restic.IndexFile, restic.SnapshotFile:
+	case restic.IndexFile, restic.SnapshotFile, restic.CheckpointFile:
 		return true
 	case restic.PackFile:
 		return h.ContainedBlobType == restic.TreeBlob

@@ -27,10 +27,10 @@ import (
 // Backend stores data in a GCS bucket.
 //
 // The service account used to access the bucket must have these permissions:
-//  * storage.objects.create
-//  * storage.objects.delete
-//  * storage.objects.get
-//  * storage.objects.list
+//   - storage.objects.create
+//   - storage.objects.delete
+//   - storage.objects.get
+//   - storage.objects.list
 type Backend struct {
 	gcsClient    *storage.Client
 	projectID    string
@@ -434,7 +434,8 @@ func (be *Backend) Delete(ctx context.Context) error {
 		restic.KeyFile,
 		restic.LockFile,
 		restic.SnapshotFile,
-		restic.IndexFile}
+		restic.IndexFile,
+		restic.CheckpointFile}
 
 	for _, t := range alltypes {
 		err := be.removeKeys(ctx, t)

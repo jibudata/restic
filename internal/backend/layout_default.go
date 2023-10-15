@@ -16,11 +16,12 @@ type DefaultLayout struct {
 }
 
 var defaultLayoutPaths = map[restic.FileType]string{
-	restic.PackFile:     "data",
-	restic.SnapshotFile: "snapshots",
-	restic.IndexFile:    "index",
-	restic.LockFile:     "locks",
-	restic.KeyFile:      "keys",
+	restic.PackFile:       "data",
+	restic.SnapshotFile:   "snapshots",
+	restic.IndexFile:      "index",
+	restic.LockFile:       "locks",
+	restic.KeyFile:        "keys",
+	restic.CheckpointFile: "checkpoints",
 }
 
 func (l *DefaultLayout) String() string {

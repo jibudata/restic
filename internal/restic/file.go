@@ -11,12 +11,13 @@ type FileType string
 
 // These are the different data types a backend can store.
 const (
-	PackFile     FileType = "data" // use data, as packs are stored under /data in repo
-	KeyFile      FileType = "key"
-	LockFile     FileType = "lock"
-	SnapshotFile FileType = "snapshot"
-	IndexFile    FileType = "index"
-	ConfigFile   FileType = "config"
+	PackFile       FileType = "data" // use data, as packs are stored under /data in repo
+	KeyFile        FileType = "key"
+	LockFile       FileType = "lock"
+	SnapshotFile   FileType = "snapshot"
+	IndexFile      FileType = "index"
+	ConfigFile     FileType = "config"
+	CheckpointFile FileType = "checkpoint"
 )
 
 // Handle is used to store and access data in a backend.
@@ -47,6 +48,7 @@ func (h Handle) Valid() error {
 	case SnapshotFile:
 	case IndexFile:
 	case ConfigFile:
+	case CheckpointFile:
 	default:
 		return errors.Errorf("invalid Type %q", h.Type)
 	}

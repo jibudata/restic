@@ -223,7 +223,7 @@ func TestArchiverSave(t *testing.T) {
 			}
 			arch.runWorkers(tmb.Context(ctx), &tmb)
 
-			node, excluded, err := arch.Save(ctx, "/", filepath.Join(tempdir, "file"), nil)
+			node, excluded, err := arch.Save(ctx, "/", filepath.Join(tempdir, "file"), nil, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -299,7 +299,7 @@ func TestArchiverSaveReaderFS(t *testing.T) {
 			}
 			arch.runWorkers(tmb.Context(ctx), &tmb)
 
-			node, excluded, err := arch.Save(ctx, "/", filename, nil)
+			node, excluded, err := arch.Save(ctx, "/", filename, nil, false)
 			t.Logf("Save returned %v %v", node, err)
 			if err != nil {
 				t.Fatal(err)
@@ -848,7 +848,7 @@ func TestArchiverSaveDir(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			ft, err := arch.SaveDir(ctx, "/", fi, test.target, nil, nil)
+			ft, err := arch.SaveDir(ctx, "/", fi, test.target, nil, nil, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -926,7 +926,7 @@ func TestArchiverSaveDirIncremental(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		ft, err := arch.SaveDir(ctx, "/", fi, tempdir, nil, nil)
+		ft, err := arch.SaveDir(ctx, "/", fi, tempdir, nil, nil, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1113,7 +1113,7 @@ func TestArchiverSaveTree(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			tree, err := arch.SaveTree(ctx, "/", atree, nil)
+			tree, err := arch.SaveTree(ctx, "/", atree, nil, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2250,7 +2250,7 @@ func TestRacyFileSwap(t *testing.T) {
 	arch.runWorkers(tmb.Context(ctx), &tmb)
 
 	// fs.Track will panic if the file was not closed
-	_, excluded, err := arch.Save(ctx, "/", tempfile, nil)
+	_, excluded, err := arch.Save(ctx, "/", tempfile, nil, false)
 	if err == nil {
 		t.Errorf("Save() should have failed")
 	}

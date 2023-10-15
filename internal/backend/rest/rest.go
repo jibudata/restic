@@ -521,7 +521,8 @@ func (b *Backend) Delete(ctx context.Context) error {
 		restic.KeyFile,
 		restic.LockFile,
 		restic.SnapshotFile,
-		restic.IndexFile}
+		restic.IndexFile,
+		restic.CheckpointFile}
 
 	for _, t := range alltypes {
 		err := b.removeKeys(ctx, t)

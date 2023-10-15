@@ -1,16 +1,24 @@
 package main
 
 import (
+	"context"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/restic/restic/internal/archiver"
 	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/filter"
+	"github.com/restic/restic/internal/fs"
+	"github.com/restic/restic/internal/repository"
 	"github.com/restic/restic/internal/restic"
 	"github.com/restic/restic/internal/restorer"
+	"github.com/restic/restic/internal/ui/backup"
+	"github.com/restic/restic/internal/ui/termstatus"
 
 	"github.com/spf13/cobra"
+	tomb "gopkg.in/tomb.v2"
 )
 
 var cmdRestore = &cobra.Command{
@@ -48,6 +56,9 @@ type RestoreOptions struct {
 }
 
 var restoreOptions RestoreOptions
+
+// ErrInvalidCheckpointData is used to report an incomplete restore
+var ErrInvalidCheckpointData = errors.New("restore checkpoint has problems")
 
 func init() {
 	cmdRoot.AddCommand(cmdRestore)
@@ -213,6 +224,224 @@ func runRestore(opts RestoreOptions, gopts GlobalOptions, args []string) error {
 		}
 		Verbosef("finished verifying %d files in %s (took %s)\n", count, opts.Target,
 			time.Since(t0).Round(time.Millisecond))
+	}
+
+	// TBD - determine if restore data has changed since last restore
+	err = doCheckpoint(opts, gopts, repo, &id, false)
+	if err != nil {
+		Verbosef("restore checkpoint failed: %v\n", err)
+	}
+
+	return err
+}
+
+// collectRejectByNameFuncs returns a list of all functions which may reject data
+// from being saved in a snapshot based on path only
+func collectRejectByNameFuncsForRestore(opts RestoreOptions, repo *repository.Repository) (fs []RejectByNameFunc, err error) {
+	// exclude restic cache
+	if repo.Cache != nil {
+		f, err := rejectResticCache(repo)
+		if err != nil {
+			return nil, err
+		}
+
+		fs = append(fs, f)
+	}
+
+	if len(opts.InsensitiveExclude) > 0 {
+		fs = append(fs, rejectByInsensitivePattern(opts.InsensitiveExclude))
+	}
+
+	if len(opts.Exclude) > 0 {
+		fs = append(fs, rejectByPattern(opts.Exclude))
+	}
+	return fs, nil
+}
+
+// parent returns the ID of the parent checkpoint. If there is none, nil is
+// returned.
+func findParentCheckpoint(ctx context.Context, repo restic.Repository, opts RestoreOptions, targets []string, timeStampLimit time.Time) (parentID *restic.ID, err error) {
+	// Find last snapshot to set it as parent, if not already set
+	id, err := restic.FindLatestCheckpoint(ctx, repo, targets, []restic.TagList{}, opts.Hosts, &timeStampLimit)
+	if err == nil {
+		parentID = &id
+	} else if err != restic.ErrNoCheckpointFound {
+		return nil, err
+	}
+
+	return parentID, nil
+}
+
+// Save checkpoint for restore
+func doCheckpoint(opts RestoreOptions, gopts GlobalOptions, repo *repository.Repository, snapshotId *restic.ID, checkLastSnapshotSync bool) error {
+
+	var t tomb.Tomb
+	var err error
+
+	term := termstatus.New(globalOptions.stdout, globalOptions.stderr, globalOptions.Quiet)
+	t.Go(func() error { term.Run(t.Context(globalOptions.ctx)); return nil })
+
+	var progressPrinter backup.ProgressPrinter
+	if gopts.JSON {
+		progressPrinter = backup.NewJSONProgress(term, gopts.verbosity)
+	} else {
+		progressPrinter = backup.NewTextProgress(term, gopts.verbosity)
+	}
+	progressReporter := backup.NewProgress(progressPrinter)
+
+	progressPrinter.V("start restore checkpoint")
+
+	//if opts.DryRun {
+	//	repo.SetDryRun()
+	//	progressReporter.SetDryRun()
+	//}
+
+	// use the terminal for stdout/stderr
+	prevStdout, prevStderr := gopts.stdout, gopts.stderr
+	defer func() {
+		gopts.stdout, gopts.stderr = prevStdout, prevStderr
+	}()
+	gopts.stdout, gopts.stderr = progressPrinter.Stdout(), progressPrinter.Stderr()
+
+	progressReporter.SetMinUpdatePause(calculateProgressInterval(!gopts.Quiet, gopts.JSON))
+
+	t.Go(func() error { return progressReporter.Run(t.Context(gopts.ctx)) })
+
+	if !gopts.JSON {
+		progressPrinter.V("lock repository")
+	}
+
+	if gopts.NoLock {
+		lock, err := lockRepo(gopts.ctx, repo)
+		defer unlockRepo(lock)
+		if err != nil {
+			return err
+		}
+	}
+
+	var id restic.ID
+	if checkLastSnapshotSync {
+		checkPoint := restic.NewCheckpoint(snapshotId)
+		// save checkpoint json to repo
+		id, err = repo.SaveJSONUnpacked(context.TODO(), restic.CheckpointFile, *checkPoint)
+		if err != nil {
+			return err
+		}
+
+	} else {
+
+		var targetFS fs.FS = fs.Local{}
+		var targets []string
+
+		timeStamp := time.Now()
+
+		targets = append(targets, opts.Target)
+
+		// rejectByNameFuncs collect functions that can reject items from the backup based on path only
+		rejectByNameFuncs, err := collectRejectByNameFuncsForRestore(opts, repo)
+		if err != nil {
+			return err
+		}
+
+		selectByNameFilter := func(item string) bool {
+			for _, reject := range rejectByNameFuncs {
+				if reject(item) {
+					return false
+				}
+			}
+			return true
+		}
+
+		sc := archiver.NewScanner(targetFS)
+		sc.SelectByName = selectByNameFilter
+		//sc.Select = selectFilter
+		sc.Error = progressReporter.ScannerError
+		sc.Result = progressReporter.ReportTotal
+
+		if !gopts.JSON {
+			progressPrinter.V("start scan on %v", opts.Target)
+		}
+		t.Go(func() error { return sc.Scan(t.Context(gopts.ctx), targets) })
+
+		arch := archiver.New(repo, targetFS, archiver.Options{})
+		arch.SelectByName = selectByNameFilter
+		//arch.Select = selectFilter
+		//arch.WithAtime = opts.WithAtime
+		success := true
+		arch.Error = func(item string, fi os.FileInfo, err error) error {
+			success = false
+			return progressReporter.Error(item, fi, err)
+		}
+		arch.CompleteItem = progressReporter.CompleteItem
+		arch.StartFile = progressReporter.StartFile
+		arch.CompleteBlob = progressReporter.CompleteBlob
+
+		var parentCheckpointID *restic.ID
+		parentCheckpointID, err = findParentCheckpoint(gopts.ctx, repo, opts, targets, timeStamp)
+		if err != nil {
+			return err
+		}
+
+		if !gopts.JSON {
+			if parentCheckpointID != nil {
+				progressPrinter.P("using parent checkpoint %v\n", parentCheckpointID.Str())
+			} else {
+				progressPrinter.P("no parent checkpoint found, will read all files\n")
+			}
+		}
+
+		var originalSnapshotId *restic.ID
+		if parentCheckpointID == nil {
+			parentCheckpointID = &restic.ID{}
+			originalSnapshotId = snapshotId
+		} else {
+			cp, err := restic.LoadCheckpoint(gopts.ctx, repo, *parentCheckpointID)
+			if err != nil {
+				debug.Log("unable to load parent checkpoint %v: %v", parentCheckpointID, err)
+				return nil
+			}
+			originalSnapshotId = cp.OriginalSnapshotId
+		}
+
+		var hostName string
+		if len(opts.Hosts) > 0 {
+			hostName = opts.Hosts[0]
+		}
+
+		snapshotOpts := archiver.SnapshotOptions{
+			Excludes:         opts.Exclude,
+			Tags:             opts.Tags.Flatten(),
+			Time:             timeStamp,
+			Hostname:         hostName,
+			ParentSnapshot:   *originalSnapshotId,
+			ParentCheckpoint: *parentCheckpointID,
+		}
+
+		if !gopts.JSON {
+			progressPrinter.V("start backup on %v", targets)
+		}
+		_, id, err = arch.Checkpoint(gopts.ctx, targets, snapshotOpts)
+
+		// cleanly shutdown all running goroutines
+		t.Kill(nil)
+
+		werr := t.Wait()
+
+		// return original error
+		if err != nil {
+			return errors.Fatalf("unable to save checkpoint: %v", err)
+		}
+
+		// Report finished execution
+		progressReporter.Finish(id)
+		if !gopts.JSON {
+			progressPrinter.P("checkpoint %s saved\n", id.Str())
+		}
+		if !success {
+			return ErrInvalidCheckpointData
+		}
+
+		return werr
 	}
 
 	return nil

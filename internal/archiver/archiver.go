@@ -229,7 +229,7 @@ func (arch *Archiver) wrapLoadTreeError(id restic.ID, err error) error {
 
 // SaveDir stores a directory in the repo and returns the node. snPath is the
 // path within the current snapshot.
-func (arch *Archiver) SaveDir(ctx context.Context, snPath string, fi os.FileInfo, dir string, previous *restic.Tree, complete CompleteFunc) (d FutureTree, err error) {
+func (arch *Archiver) SaveDir(ctx context.Context, snPath string, fi os.FileInfo, dir string, previous *restic.Tree, complete CompleteFunc, treeBlobOnly bool) (d FutureTree, err error) {
 	debug.Log("%v %v", snPath, dir)
 
 	treeNode, err := arch.nodeFromFileInfo(dir, fi)
@@ -255,7 +255,7 @@ func (arch *Archiver) SaveDir(ctx context.Context, snPath string, fi os.FileInfo
 		pathname := arch.FS.Join(dir, name)
 		oldNode := previous.Find(name)
 		snItem := join(snPath, name)
-		fn, excluded, err := arch.Save(ctx, snItem, pathname, oldNode)
+		fn, excluded, err := arch.Save(ctx, snItem, pathname, oldNode, treeBlobOnly)
 
 		// return error early if possible
 		if err != nil {
@@ -342,7 +342,7 @@ func (arch *Archiver) allBlobsPresent(previous *restic.Node) bool {
 // Errors and completion needs to be handled by the caller.
 //
 // snPath is the path within the current snapshot.
-func (arch *Archiver) Save(ctx context.Context, snPath, target string, previous *restic.Node) (fn FutureNode, excluded bool, err error) {
+func (arch *Archiver) Save(ctx context.Context, snPath, target string, previous *restic.Node, treeBlobOnly bool) (fn FutureNode, excluded bool, err error) {
 	start := time.Now()
 
 	fn = FutureNode{
@@ -381,6 +381,10 @@ func (arch *Archiver) Save(ctx context.Context, snPath, target string, previous 
 
 	switch {
 	case fs.IsRegularFile(fi):
+		if treeBlobOnly {
+			debug.Log("  %v regular file skipped", target)
+			break
+		}
 		debug.Log("  %v regular file", target)
 		start := time.Now()
 
@@ -470,7 +474,7 @@ func (arch *Archiver) Save(ctx context.Context, snPath, target string, previous 
 		fn.tree, err = arch.SaveDir(ctx, snPath, fi, target, oldSubtree,
 			func(node *restic.Node, stats ItemStats) {
 				arch.CompleteItem(snItem, previous, node, stats, time.Since(start))
-			})
+			}, treeBlobOnly)
 		if err != nil {
 			debug.Log("SaveDir for %v returned error: %v", snPath, err)
 			return FutureNode{}, false, err
@@ -547,7 +551,7 @@ func (arch *Archiver) statDir(dir string) (os.FileInfo, error) {
 
 // SaveTree stores a Tree in the repo, returned is the tree. snPath is the path
 // within the current snapshot.
-func (arch *Archiver) SaveTree(ctx context.Context, snPath string, atree *Tree, previous *restic.Tree) (*restic.Tree, error) {
+func (arch *Archiver) SaveTree(ctx context.Context, snPath string, atree *Tree, previous *restic.Tree, treeBlobOnly bool) (*restic.Tree, error) {
 	debug.Log("%v (%v nodes), parent %v", snPath, len(atree.Nodes), previous)
 
 	nodeNames := atree.NodeNames()
@@ -566,7 +570,7 @@ func (arch *Archiver) SaveTree(ctx context.Context, snPath string, atree *Tree, 
 
 		// this is a leaf node
 		if subatree.Leaf() {
-			fn, excluded, err := arch.Save(ctx, join(snPath, name), subatree.Path, previous.Find(name))
+			fn, excluded, err := arch.Save(ctx, join(snPath, name), subatree.Path, previous.Find(name), treeBlobOnly)
 
 			if err != nil {
 				err = arch.error(subatree.Path, fn.fi, err)
@@ -600,7 +604,7 @@ func (arch *Archiver) SaveTree(ctx context.Context, snPath string, atree *Tree, 
 		}
 
 		// not a leaf node, archive subtree
-		subtree, err := arch.SaveTree(ctx, join(snPath, name), &subatree, oldSubtree)
+		subtree, err := arch.SaveTree(ctx, join(snPath, name), &subatree, oldSubtree, treeBlobOnly)
 		if err != nil {
 			return nil, err
 		}
@@ -726,11 +730,12 @@ func resolveRelativeTargets(filesys fs.FS, targets []string) ([]string, error) {
 
 // SnapshotOptions collect attributes for a new snapshot.
 type SnapshotOptions struct {
-	Tags           restic.TagList
-	Hostname       string
-	Excludes       []string
-	Time           time.Time
-	ParentSnapshot restic.ID
+	Tags             restic.TagList
+	Hostname         string
+	Excludes         []string
+	Time             time.Time
+	ParentSnapshot   restic.ID
+	ParentCheckpoint restic.ID
 }
 
 // loadParentTree loads a tree referenced by snapshot id. If id is null, nil is returned.
@@ -777,6 +782,10 @@ func (arch *Archiver) runWorkers(ctx context.Context, t *tomb.Tomb) {
 
 // Snapshot saves several targets and returns a snapshot.
 func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts SnapshotOptions) (*restic.Snapshot, restic.ID, error) {
+	return arch.snapshot(ctx, targets, opts, false)
+}
+
+func (arch *Archiver) snapshot(ctx context.Context, targets []string, opts SnapshotOptions, checkpoint bool) (*restic.Snapshot, restic.ID, error) {
 	cleanTargets, err := resolveRelativeTargets(arch.FS, targets)
 	if err != nil {
 		return nil, restic.ID{}, err
@@ -797,7 +806,7 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 		arch.runWorkers(wctx, &t)
 
 		debug.Log("starting snapshot")
-		tree, err := arch.SaveTree(wctx, "/", atree, arch.loadParentTree(wctx, opts.ParentSnapshot))
+		tree, err := arch.SaveTree(wctx, "/", atree, arch.loadParentTree(wctx, opts.ParentSnapshot), checkpoint)
 		if err != nil {
 			return err
 		}
@@ -827,6 +836,7 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 		return nil, restic.ID{}, err
 	}
 
+	var id restic.ID
 	sn, err := restic.NewSnapshot(targets, opts.Tags, opts.Hostname, opts.Time)
 	if err != nil {
 		return nil, restic.ID{}, err
@@ -839,10 +849,35 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 	}
 	sn.Tree = &rootTreeID
 
-	id, err := arch.Repo.SaveJSONUnpacked(ctx, restic.SnapshotFile, sn)
+	if !checkpoint {
+		id, err = arch.Repo.SaveJSONUnpacked(ctx, restic.SnapshotFile, sn)
+		if err != nil {
+			return nil, restic.ID{}, err
+		}
+	}
+
+	return sn, id, nil
+}
+
+// Checkpoint saves several targets for tree blobs only and returns a checkpoint.
+func (arch *Archiver) Checkpoint(ctx context.Context, targets []string, opts SnapshotOptions) (*restic.Checkpoint, restic.ID, error) {
+	sn, _, err := arch.snapshot(ctx, targets, opts, true)
 	if err != nil {
 		return nil, restic.ID{}, err
 	}
 
-	return sn, id, nil
+	cp := restic.NewCheckpoint(&opts.ParentSnapshot)
+
+	cp.Snapshot = *sn
+	if !opts.ParentCheckpoint.IsNull() {
+		pid := opts.ParentCheckpoint
+		cp.Parent = &pid
+	}
+
+	id, err := arch.Repo.SaveJSONUnpacked(ctx, restic.CheckpointFile, cp)
+	if err != nil {
+		return nil, restic.ID{}, err
+	}
+
+	return cp, id, nil
 }
