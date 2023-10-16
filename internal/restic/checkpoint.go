@@ -20,7 +20,7 @@ import (
 // Checkpoint.Snapshot is a state of saving tree blobs
 //
 // Normally when last restore complete, the state of restore is same as
-// backup snapshot (say sn1), then OriginalSnapshotId = sn1.
+// backup snapshot (say sn1), then OriginalSnapshotID = sn1.
 // Next time when restore backup snapshot sn2, there are 2 possibilities:
 // 1. Restore files has not changed at all
 // 2. Restore files changed (e.g., last restore was not completed, or user
@@ -29,7 +29,7 @@ import (
 // 1 or 2, then perform incremental restore based on that result.
 type Checkpoint struct {
 	Snapshot           `json:",inline"`
-	OriginalSnapshotId *ID `json:"originalSnapshotId,omitempty"`
+	OriginalSnapshotID *ID `json:"originalSnapshotID,omitempty"`
 	Parent             *ID `json:"parent,omitempty"`
 
 	// Does not support json update yet
@@ -40,7 +40,7 @@ type Checkpoint struct {
 
 func NewCheckpoint(oid *ID) *Checkpoint {
 	return &Checkpoint{
-		OriginalSnapshotId: oid,
+		OriginalSnapshotID: oid,
 	}
 }
 

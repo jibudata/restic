@@ -76,7 +76,6 @@ func FindFilteredSnapshots(ctx context.Context, repo *repository.Repository, hos
 }
 
 // FindFilteredCheckpoints yields Checkpoints, either given explicitly by `checkpointIDs` or filtered from the list of all checkpoints.
-// Implement similar logic as FindFilteredSnapshots for snapshot
 func FindFilteredCheckpoints(ctx context.Context, repo *repository.Repository, hosts []string, tags []restic.TagList, paths []string, checkpointIDs []string) <-chan *restic.Checkpoint {
 	out := make(chan *restic.Checkpoint)
 	go func() {

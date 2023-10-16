@@ -86,7 +86,6 @@ func FindCheckpoint(ctx context.Context, repo Repository, s string) (ID, error) 
 	return ParseID(name)
 }
 
-// Implement FindFilteredCheckpoints function which is similar to FindFilteredSnapshots
 func FindFilteredCheckpoints(ctx context.Context, repo Repository, hosts []string, tags []TagList, paths []string) (Checkpoints, error) {
 	results := make(Checkpoints, 0, 20)
 

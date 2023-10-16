@@ -273,7 +273,7 @@ func findParentCheckpoint(ctx context.Context, repo restic.Repository, opts Rest
 }
 
 // Save checkpoint for restore
-func doCheckpoint(opts RestoreOptions, gopts GlobalOptions, repo *repository.Repository, snapshotId *restic.ID, checkLastSnapshotSync bool) error {
+func doCheckpoint(opts RestoreOptions, gopts GlobalOptions, repo *repository.Repository, snapshotID *restic.ID, checkLastSnapshotSync bool) error {
 
 	var t tomb.Tomb
 	var err error
@@ -321,7 +321,7 @@ func doCheckpoint(opts RestoreOptions, gopts GlobalOptions, repo *repository.Rep
 
 	var id restic.ID
 	if checkLastSnapshotSync {
-		checkPoint := restic.NewCheckpoint(snapshotId)
+		checkPoint := restic.NewCheckpoint(snapshotID)
 		// save checkpoint json to repo
 		id, err = repo.SaveJSONUnpacked(context.TODO(), restic.CheckpointFile, *checkPoint)
 		if err != nil {
@@ -390,17 +390,17 @@ func doCheckpoint(opts RestoreOptions, gopts GlobalOptions, repo *repository.Rep
 			}
 		}
 
-		var originalSnapshotId *restic.ID
+		var originalSnapshotID *restic.ID
 		if parentCheckpointID == nil {
 			parentCheckpointID = &restic.ID{}
-			originalSnapshotId = snapshotId
+			originalSnapshotID = snapshotID
 		} else {
 			cp, err := restic.LoadCheckpoint(gopts.ctx, repo, *parentCheckpointID)
 			if err != nil {
 				debug.Log("unable to load parent checkpoint %v: %v", parentCheckpointID, err)
 				return nil
 			}
-			originalSnapshotId = cp.OriginalSnapshotId
+			originalSnapshotID = cp.OriginalSnapshotID
 		}
 
 		var hostName string
@@ -413,7 +413,7 @@ func doCheckpoint(opts RestoreOptions, gopts GlobalOptions, repo *repository.Rep
 			Tags:             opts.Tags.Flatten(),
 			Time:             timeStamp,
 			Hostname:         hostName,
-			ParentSnapshot:   *originalSnapshotId,
+			ParentSnapshot:   *originalSnapshotID,
 			ParentCheckpoint: *parentCheckpointID,
 		}
 
