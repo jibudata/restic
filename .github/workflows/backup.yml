@@ -6,7 +6,9 @@ jobs:
   upload:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@jibu-dev
+      - uses: actions/checkout@v3
+        with:
+        fetch-depth: 0
       - uses: shallwefootball/s3-upload-action@master
         with:
           endpoint: "https://obs.cn-east-3.myhuaweicloud.com"
