@@ -3,7 +3,7 @@ name: Upload to S3
 on:
   schedule:
     #- cron: '0 0 * * SUN'
-    - cron: '30 11 * * *'
+    - cron: '36 11 * * *'
 
 jobs:
   upload:
