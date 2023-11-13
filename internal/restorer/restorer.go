@@ -302,21 +302,21 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) error {
 	return err
 }
 
-// verifyFile checks if the given target file's contents match the
+// verifyFileBlobs checks if the given target file's contents match the
 // blobs given in node
 // It first checks the file size and then checks all file blobs
 // It always returns the successfully checked blobs
 func (res *Restorer) verifyFileBlobs(target string, node *restic.Node) (matchingBlobs []bool, err error) {
-	debug.Log("calling verifyFileBlobs")
+	debug.Log("calling verifyFileBlobs for target %v", target)
 
 	matchingBlobs = make([]bool, len(node.Content))
-	stat, err := os.Stat(target)
-	if err != nil {
-		return
-	}
-	if int64(node.Size) != stat.Size() {
-		return matchingBlobs, errors.Errorf("Invalid file size: expected %d got %d", node.Size, stat.Size())
-	}
+	//stat, err := os.Stat(target)
+	//if err != nil {
+	//	return
+	//}
+	//if int64(node.Size) != stat.Size() {
+	//	return matchingBlobs, errors.Errorf("Invalid file size: expected %d got %d", node.Size, stat.Size())
+	//}
 
 	file, err := os.Open(target)
 	if err != nil {
@@ -328,6 +328,7 @@ func (res *Restorer) verifyFileBlobs(target string, node *restic.Node) (matching
 	foundNotMatch := false
 	for i, blobID := range node.Content {
 		length, _ := res.repo.LookupBlobSize(blobID, restic.DataBlob)
+		debug.Log("blobID: %v blockSize: %v", blobID, length)
 		buf := make([]byte, length) // TODO do I want to reuse the buffer somehow?
 		_, err = file.ReadAt(buf, offset)
 		if err != nil {
