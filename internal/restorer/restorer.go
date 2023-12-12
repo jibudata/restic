@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 
 	"github.com/restic/restic/internal/debug"
@@ -319,15 +320,22 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) error {
 				filerestorer.addNewFile(location, node.Content, int64(node.Size))
 			} else if isFileChanged(currentFile, node) {
 				var existingBlobs map[int64]struct{}
+				var equalFile bool
+				var currentSize int64
 				if !res.sparse {
-					existingBlobs, err = res.compareFile(target, node)
+					existingBlobs, currentSize, equalFile, err = res.compareFile(target, node)
 					if err != nil {
 						fmt.Printf("DEBUG: Failed to process file %s, err: %s\n", target, err)
 						return err
 					}
 				}
-				fmt.Printf("DEBUG: Adding modified file with existing blobs %v, location: %s, target: %s\n", existingBlobs, location, target)
-				filerestorer.addModifiedFilesFile(location, node.Content, int64(node.Size), existingBlobs)
+
+				if !equalFile {
+					fmt.Printf("DEBUG: Adding modified file with existing blobs %v, location: %s, target: %s\n", existingBlobs, location, target)
+					filerestorer.addModifiedFilesFile(location, node.Content, int64(node.Size), currentSize, existingBlobs)
+				} else {
+					fmt.Printf("DEBUG: Found unchanged file, skip restoring, location: %s, target: %s\n", location, target)
+				}
 			} else {
 				fmt.Printf("DEBUG: Found unchanged file, skip restoring, location: %s, target: %s\n", location, target)
 			}
@@ -504,15 +512,24 @@ func (res *Restorer) verifyFile(target string, node *restic.Node, buf []byte) ([
 	return buf, nil
 }
 
-// compareFile compares the current file blob hash between the one in node one by one, and returns the equal ones
-func (res *Restorer) compareFile(target string, node *restic.Node) (map[int64]struct{}, error) {
+// compareFile compares the current file blob hash between the one in node one by one, and returns the equal ones.
+// It also returns a bool value to indicate if the current file is equal to the file in snapshot.
+// Note:
+// If a file contains all the contents of the snapshot, with just some additional content at the end,
+// it will still be considered equal, the extra content will be truncated.
+func (res *Restorer) compareFile(target string, node *restic.Node) (map[int64]struct{}, int64, bool, error) {
 	f, err := os.Open(target)
 	if err != nil {
-		return nil, err
+		return nil, 0, false, err
 	}
 	defer func() {
 		_ = f.Close()
 	}()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, 0, false, err
+	}
 
 	existingBlobs := make(map[int64]struct{})
 
@@ -521,7 +538,7 @@ func (res *Restorer) compareFile(target string, node *restic.Node) (map[int64]st
 	for _, blobID := range node.Content {
 		length, found := res.repo.LookupBlobSize(blobID, restic.DataBlob)
 		if !found {
-			return nil, errors.Errorf("Unable to fetch blob %s", blobID)
+			return nil, 0, false, errors.Errorf("Unable to fetch blob %s", blobID)
 		}
 
 		if length > uint(cap(buf)) {
@@ -534,7 +551,7 @@ func (res *Restorer) compareFile(target string, node *restic.Node) (map[int64]st
 			if err == io.EOF {
 				break
 			}
-			return nil, err
+			return nil, 0, false, err
 		}
 		if blobID.Equal(restic.Hash(buf)) {
 			existingBlobs[offset] = struct{}{}
@@ -542,9 +559,26 @@ func (res *Restorer) compareFile(target string, node *restic.Node) (map[int64]st
 		offset += int64(length)
 	}
 
-	return existingBlobs, nil
+	equal := len(existingBlobs) == len(node.Content)
+	currentSize := fi.Size()
+	if equal {
+		// equal files with be skipped in restore, so if file size > snapshot file size, truncate it in advance.
+		if currentSize > int64(node.Size) {
+			err = f.Truncate(int64(node.Size))
+			if err != nil {
+				return nil, 0, false, err
+			}
+		}
+	}
+
+	return existingBlobs, currentSize, equal, nil
 }
 
 func isFileChanged(currentFile existingFileInfo, node *restic.Node) bool {
+	yes, _ := strconv.ParseBool(os.Getenv("RESTIC_QUICK_DIFF_CHECK"))
+	if !yes {
+		return true
+	}
+
 	return !currentFile.modTime.Equal(node.ModTime)
 }

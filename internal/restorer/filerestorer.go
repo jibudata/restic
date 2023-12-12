@@ -39,6 +39,7 @@ type fileInfo struct {
 	inProgress    bool
 	sparse        bool
 	size          int64
+	currentSize   int64
 	location      string      // file on local filesystem relative to restorer basedir
 	blobs         interface{} // blobs of the file
 	existingBlobs map[int64]struct{}
@@ -108,8 +109,8 @@ func (r *fileRestorer) addNewFile(location string, content restic.IDs, size int6
 	r.newFiles = append(r.newFiles, &fileInfo{location: location, blobs: content, size: size})
 }
 
-func (r *fileRestorer) addModifiedFilesFile(location string, content restic.IDs, size int64, existingBlobs map[int64]struct{}) {
-	r.modifiedFiles = append(r.modifiedFiles, &fileInfo{location: location, blobs: content, size: size, existingBlobs: existingBlobs})
+func (r *fileRestorer) addModifiedFilesFile(location string, content restic.IDs, size, currentSize int64, existingBlobs map[int64]struct{}) {
+	r.modifiedFiles = append(r.modifiedFiles, &fileInfo{location: location, blobs: content, size: size, currentSize: currentSize, existingBlobs: existingBlobs})
 }
 
 func (r *fileRestorer) targetPath(location string) string {
@@ -320,7 +321,7 @@ func (r *fileRestorer) downloadPack(ctx context.Context, pack *packInfo) error {
 						file.inProgress = true
 						createSize = file.size
 					}
-					writeErr := r.filesWriter.writeToFile(r.targetPath(file.location), blobData, offset, createSize, file.sparse, len(file.existingBlobs) > 0)
+					writeErr := r.filesWriter.writeToFile(r.targetPath(file.location), blobData, offset, createSize, file.currentSize, file.sparse)
 
 					if r.progress != nil {
 						r.progress.AddProgress(file.location, uint64(len(blobData)), uint64(file.size))

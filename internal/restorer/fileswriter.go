@@ -39,7 +39,7 @@ func newFilesWriter(count int) *filesWriter {
 	}
 }
 
-func (w *filesWriter) writeToFile(path string, blob []byte, offset int64, createSize int64, sparse bool, hasExistingBlobs bool) error {
+func (w *filesWriter) writeToFile(path string, blob []byte, offset int64, createSize, currentSize int64, sparse bool) error {
 	bucket := &w.buckets[uint(xxhash.Sum64String(path))%uint(len(w.buckets))]
 
 	acquireWriter := func() (*partialFile, error) {
@@ -54,8 +54,8 @@ func (w *filesWriter) writeToFile(path string, blob []byte, offset int64, create
 		var flags int
 		if createSize >= 0 {
 			flags = os.O_CREATE | os.O_WRONLY
-			// do not trunc the file if there are existing blobs with the same hash
-			if !hasExistingBlobs {
+			// do not trunc the file if it is existing and has content
+			if currentSize == 0 {
 				flags = flags | os.O_TRUNC
 			}
 		} else {
@@ -77,12 +77,10 @@ func (w *filesWriter) writeToFile(path string, blob []byte, offset int64, create
 					return nil, err
 				}
 			} else {
-				if hasExistingBlobs {
+				if currentSize > createSize {
 					err = f.Truncate(createSize)
 					if err != nil {
-						// Just log the Truncate error but don't let it cause the restore process to fail.
-						// Truncate might return an error if the current size is equal to createSize
-						debug.Log("Failed to truncate %v with size %v: %v", path, createSize, err)
+						return nil, err
 					}
 				} else {
 					err = fs.PreallocateFile(wr.File, createSize)
