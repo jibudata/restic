@@ -2,6 +2,8 @@ package restorer
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -230,6 +232,24 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) error {
 		}
 	}
 
+	currentFiles := make(map[string]existingFileInfo)
+	err = filepath.Walk(dst, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if path == dst {
+			return nil
+		}
+		currentFiles[path] = existingFileInfo{location: path, modTime: info.ModTime()}
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return errors.Wrap(err, "Failed to get current files")
+	}
+
+	fmt.Printf("DEBUG: Current files: %#v\n", currentFiles)
+
 	idx := NewHardlinkIndex()
 	filerestorer := newFileRestorer(dst, res.repo.Backend().Load, res.repo.Key(), res.repo.Index().Lookup,
 		res.repo.Connections(), res.sparse, res.progress)
@@ -244,6 +264,9 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) error {
 			if res.progress != nil {
 				res.progress.AddFile(0)
 			}
+
+			defer delete(currentFiles, target)
+
 			// create dir with default permissions
 			// #leaveDir restores dir metadata after visiting all children
 			return fs.MkdirAll(target, 0700)
@@ -251,6 +274,9 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) error {
 
 		visitNode: func(node *restic.Node, target, location string) error {
 			debug.Log("first pass, visitNode: mkdir %q, leaveDir on second pass should restore metadata", location)
+
+			defer delete(currentFiles, target)
+
 			// create parent dir with default permissions
 			// second pass #leaveDir restores dir metadata after visiting/restoring all children
 			err := fs.MkdirAll(filepath.Dir(target), 0700)
@@ -287,13 +313,37 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) error {
 				res.progress.AddFile(node.Size)
 			}
 
-			filerestorer.addFile(location, node.Content, int64(node.Size))
+			currentFile, ok := currentFiles[target]
+			if !ok {
+				fmt.Printf("DEBUG: Adding new file, location: %s, target: %s\n", location, target)
+				filerestorer.addNewFile(location, node.Content, int64(node.Size))
+			} else if isFileChanged(currentFile, node) {
+				existingBlobs, err := res.preprocessFile(target, node)
+				if err != nil {
+					fmt.Printf("DEBUG: Failed to process file %s, err: %s\n", target, err)
+					return err
+				}
+				fmt.Printf("DEBUG: Adding modified file with existing blobs %#v, location: %s, target: %s\n", existingBlobs, location, target)
+				filerestorer.addModifiedFilesFile(location, node.Content, int64(node.Size), existingBlobs)
+			} else {
+				fmt.Printf("DEBUG: Found unchanged file, skip restoring, location: %s, target: %s\n", location, target)
+			}
 
 			return nil
 		},
 	})
 	if err != nil {
 		return err
+	}
+
+	for target := range currentFiles {
+		location, err := filepath.Rel(dst, target)
+		if err != nil {
+			fmt.Printf("DEBUG: Failed to find relative path, :%s\n", err)
+			return err
+		}
+		fmt.Printf("DEBUG: Adding stale file, location: %s, target: %s\n", location, target)
+		filerestorer.addStaleFilesFile(location)
 	}
 
 	err = filerestorer.restoreFiles(ctx)
@@ -449,4 +499,64 @@ func (res *Restorer) verifyFile(target string, node *restic.Node, buf []byte) ([
 	}
 
 	return buf, nil
+}
+
+// preprocessFile compares the current file blob hash between the one in node one by one, and returns the equal ones
+// It also truncates the remaining content of the file after comparing, if current file size > node file size
+func (res *Restorer) preprocessFile(target string, node *restic.Node) (map[int64]struct{}, error) {
+	f, err := os.Open(target)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	existingBlobs := make(map[int64]struct{})
+
+	var offset int64
+	var buf []byte
+	for _, blobID := range node.Content {
+		length, found := res.repo.LookupBlobSize(blobID, restic.DataBlob)
+		if !found {
+			return nil, errors.Errorf("Unable to fetch blob %s", blobID)
+		}
+
+		if length > uint(cap(buf)) {
+			buf = make([]byte, 2*length)
+		}
+		buf = buf[:length]
+
+		_, err = f.ReadAt(buf, offset)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+		if !blobID.Equal(restic.Hash(buf)) {
+			existingBlobs[offset] = struct{}{}
+		}
+		offset += int64(length)
+	}
+
+	// truncate the remaining content of the file if current file size > node file size
+	_, err = f.Seek(offset, 0)
+	if err != nil {
+		if err == io.EOF {
+			return existingBlobs, nil
+		}
+		return nil, err
+	}
+
+	err = f.Truncate(offset)
+	if err != nil {
+		return nil, err
+	}
+
+	return existingBlobs, nil
+}
+
+func isFileChanged(currentFile existingFileInfo, node *restic.Node) bool {
+	return !currentFile.modTime.Equal(node.ModTime)
 }

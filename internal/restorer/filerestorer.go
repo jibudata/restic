@@ -2,8 +2,11 @@ package restorer
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -24,14 +27,21 @@ const (
 	largeFileBlobCount = 25
 )
 
+// information about existing file
+type existingFileInfo struct {
+	location string
+	modTime  time.Time
+}
+
 // information about regular file being restored
 type fileInfo struct {
-	lock       sync.Mutex
-	inProgress bool
-	sparse     bool
-	size       int64
-	location   string      // file on local filesystem relative to restorer basedir
-	blobs      interface{} // blobs of the file
+	lock          sync.Mutex
+	inProgress    bool
+	sparse        bool
+	size          int64
+	location      string      // file on local filesystem relative to restorer basedir
+	blobs         interface{} // blobs of the file
+	existingBlobs map[int64]struct{}
 }
 
 type fileBlobInfo struct {
@@ -57,9 +67,12 @@ type fileRestorer struct {
 	sparse      bool
 	progress    *restore.Progress
 
-	dst   string
-	files []*fileInfo
-	Error func(string, error) error
+	dst           string
+	files         []*fileInfo
+	newFiles      []*fileInfo
+	staleFiles    []*fileInfo
+	modifiedFiles []*fileInfo
+	Error         func(string, error) error
 }
 
 func newFileRestorer(dst string,
@@ -87,8 +100,16 @@ func newFileRestorer(dst string,
 	}
 }
 
-func (r *fileRestorer) addFile(location string, content restic.IDs, size int64) {
-	r.files = append(r.files, &fileInfo{location: location, blobs: content, size: size})
+func (r *fileRestorer) addStaleFilesFile(location string) {
+	r.staleFiles = append(r.staleFiles, &fileInfo{location: location})
+}
+
+func (r *fileRestorer) addNewFile(location string, content restic.IDs, size int64) {
+	r.newFiles = append(r.newFiles, &fileInfo{location: location, blobs: content, size: size})
+}
+
+func (r *fileRestorer) addModifiedFilesFile(location string, content restic.IDs, size int64, existingBlobs map[int64]struct{}) {
+	r.modifiedFiles = append(r.modifiedFiles, &fileInfo{location: location, blobs: content, size: size, existingBlobs: existingBlobs})
 }
 
 func (r *fileRestorer) targetPath(location string) string {
@@ -111,7 +132,24 @@ func (r *fileRestorer) forEachBlob(blobIDs []restic.ID, fn func(packID restic.ID
 	return nil
 }
 
+func (r *fileRestorer) deleteStaleFiles(_ context.Context) error {
+	for _, file := range r.staleFiles {
+		fmt.Printf("DEBUG: Deleting stage file: %s\n", filepath.Join(r.dst, file.location))
+		err := os.RemoveAll(filepath.Join(r.dst, file.location))
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (r *fileRestorer) restoreFiles(ctx context.Context) error {
+
+	err := r.deleteStaleFiles(ctx)
+	if err != nil {
+		return err
+	}
 
 	packs := make(map[restic.ID]*packInfo) // all packs
 	// Process packs in order of first access. While this cannot guarantee
@@ -120,7 +158,7 @@ func (r *fileRestorer) restoreFiles(ctx context.Context) error {
 	var packOrder restic.IDs
 
 	// create packInfo from fileInfo
-	for _, file := range r.files {
+	for _, file := range r.newFiles {
 		fileBlobs := file.blobs.(restic.IDs)
 		largeFile := len(fileBlobs) > largeFileBlobCount
 		var packsMap map[restic.ID][]fileBlobInfo
@@ -130,7 +168,11 @@ func (r *fileRestorer) restoreFiles(ctx context.Context) error {
 		fileOffset := int64(0)
 		err := r.forEachBlob(fileBlobs, func(packID restic.ID, blob restic.Blob) {
 			if largeFile {
-				packsMap[packID] = append(packsMap[packID], fileBlobInfo{id: blob.ID, offset: fileOffset})
+				if _, ok := file.existingBlobs[fileOffset]; !ok {
+					packsMap[packID] = append(packsMap[packID], fileBlobInfo{id: blob.ID, offset: fileOffset})
+				} else {
+					fmt.Printf("DEBUG: Ignoring blob %v at %d of file %s as it already exists\n", blob.ID, fileOffset, file.location)
+				}
 				fileOffset += int64(blob.DataLength())
 			}
 			pack, ok := packs[packID]
@@ -218,7 +260,11 @@ func (r *fileRestorer) downloadPack(ctx context.Context, pack *packInfo) error {
 			fileOffset := int64(0)
 			err := r.forEachBlob(fileBlobs, func(packID restic.ID, blob restic.Blob) {
 				if packID.Equal(pack.id) {
-					addBlob(blob, fileOffset)
+					if _, ok := file.existingBlobs[fileOffset]; !ok {
+						addBlob(blob, fileOffset)
+					} else {
+						fmt.Printf("DEBUG: Ignoring blob %v at %d of file %s as it already exists\n", blob.ID, fileOffset, file.location)
+					}
 				}
 				fileOffset += int64(blob.DataLength())
 			})
