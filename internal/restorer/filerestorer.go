@@ -158,7 +158,7 @@ func (r *fileRestorer) restoreFiles(ctx context.Context) error {
 	var packOrder restic.IDs
 
 	// create packInfo from fileInfo
-	for _, file := range r.newFiles {
+	for _, file := range append(r.newFiles, r.modifiedFiles...) {
 		fileBlobs := file.blobs.(restic.IDs)
 		largeFile := len(fileBlobs) > largeFileBlobCount
 		var packsMap map[restic.ID][]fileBlobInfo
