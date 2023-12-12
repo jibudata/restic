@@ -318,12 +318,15 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) error {
 				fmt.Printf("DEBUG: Adding new file, location: %s, target: %s\n", location, target)
 				filerestorer.addNewFile(location, node.Content, int64(node.Size))
 			} else if isFileChanged(currentFile, node) {
-				existingBlobs, err := res.preprocessFile(target, node)
-				if err != nil {
-					fmt.Printf("DEBUG: Failed to process file %s, err: %s\n", target, err)
-					return err
+				var existingBlobs map[int64]struct{}
+				if !res.sparse {
+					existingBlobs, err = res.compareFile(target, node)
+					if err != nil {
+						fmt.Printf("DEBUG: Failed to process file %s, err: %s\n", target, err)
+						return err
+					}
 				}
-				fmt.Printf("DEBUG: Adding modified file with existing blobs %#v, location: %s, target: %s\n", existingBlobs, location, target)
+				fmt.Printf("DEBUG: Adding modified file with existing blobs %v, location: %s, target: %s\n", existingBlobs, location, target)
 				filerestorer.addModifiedFilesFile(location, node.Content, int64(node.Size), existingBlobs)
 			} else {
 				fmt.Printf("DEBUG: Found unchanged file, skip restoring, location: %s, target: %s\n", location, target)
@@ -501,9 +504,8 @@ func (res *Restorer) verifyFile(target string, node *restic.Node, buf []byte) ([
 	return buf, nil
 }
 
-// preprocessFile compares the current file blob hash between the one in node one by one, and returns the equal ones
-// It also truncates the remaining content of the file after comparing, if current file size > node file size
-func (res *Restorer) preprocessFile(target string, node *restic.Node) (map[int64]struct{}, error) {
+// compareFile compares the current file blob hash between the one in node one by one, and returns the equal ones
+func (res *Restorer) compareFile(target string, node *restic.Node) (map[int64]struct{}, error) {
 	f, err := os.Open(target)
 	if err != nil {
 		return nil, err
@@ -511,11 +513,6 @@ func (res *Restorer) preprocessFile(target string, node *restic.Node) (map[int64
 	defer func() {
 		_ = f.Close()
 	}()
-
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
 
 	existingBlobs := make(map[int64]struct{})
 
@@ -543,19 +540,6 @@ func (res *Restorer) preprocessFile(target string, node *restic.Node) (map[int64
 			existingBlobs[offset] = struct{}{}
 		}
 		offset += int64(length)
-	}
-
-	// truncate the remaining content of the file if current file size > node file size
-	if fi.Size() > int64(node.Size) {
-		_, err = f.Seek(int64(node.Size), 0)
-		if err != nil {
-			return nil, err
-		}
-
-		err = f.Truncate(int64(node.Size))
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	return existingBlobs, nil
