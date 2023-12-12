@@ -53,7 +53,7 @@ func (w *filesWriter) writeToFile(path string, blob []byte, offset int64, create
 
 		var flags int
 		if createSize >= 0 {
-			flags = os.O_CREATE | os.O_TRUNC | os.O_WRONLY
+			flags = os.O_CREATE | os.O_WRONLY
 		} else {
 			flags = os.O_WRONLY
 		}

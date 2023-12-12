@@ -248,7 +248,7 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) error {
 		return errors.Wrap(err, "Failed to get current files")
 	}
 
-	fmt.Printf("DEBUG: Current files: %#v\n", currentFiles)
+	fmt.Printf("DEBUG: Current files: %v\n", currentFiles)
 
 	idx := NewHardlinkIndex()
 	filerestorer := newFileRestorer(dst, res.repo.Backend().Load, res.repo.Key(), res.repo.Index().Lookup,
@@ -512,6 +512,11 @@ func (res *Restorer) preprocessFile(target string, node *restic.Node) (map[int64
 		_ = f.Close()
 	}()
 
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
 	existingBlobs := make(map[int64]struct{})
 
 	var offset int64
@@ -534,24 +539,23 @@ func (res *Restorer) preprocessFile(target string, node *restic.Node) (map[int64
 			}
 			return nil, err
 		}
-		if !blobID.Equal(restic.Hash(buf)) {
+		if blobID.Equal(restic.Hash(buf)) {
 			existingBlobs[offset] = struct{}{}
 		}
 		offset += int64(length)
 	}
 
 	// truncate the remaining content of the file if current file size > node file size
-	_, err = f.Seek(offset, 0)
-	if err != nil {
-		if err == io.EOF {
-			return existingBlobs, nil
+	if fi.Size() > int64(node.Size) {
+		_, err = f.Seek(int64(node.Size), 0)
+		if err != nil {
+			return nil, err
 		}
-		return nil, err
-	}
 
-	err = f.Truncate(offset)
-	if err != nil {
-		return nil, err
+		err = f.Truncate(int64(node.Size))
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return existingBlobs, nil
