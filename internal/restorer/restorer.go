@@ -335,7 +335,7 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) error {
 					fmt.Printf("DEBUG: Adding modified file with existing blobs %v, location: %s, target: %s\n", existingBlobs, location, target)
 					filerestorer.addModifiedFilesFile(location, node.Content, int64(node.Size), currentSize, existingBlobs)
 				} else {
-					fmt.Printf("DEBUG: Found unchanged file, skip restoring, location: %s, target: %s\n", location, target)
+					fmt.Printf("DEBUG: Found unchanged file after compare, skip restoring, location: %s, target: %s\n", location, target)
 				}
 			} else {
 				fmt.Printf("DEBUG: Found unchanged file, skip restoring, location: %s, target: %s\n", location, target)
