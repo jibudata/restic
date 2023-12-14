@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"sync/atomic"
 
+	"github.com/restic/chunker"
 	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/fs"
@@ -518,6 +519,16 @@ func (res *Restorer) verifyFile(target string, node *restic.Node, buf []byte) ([
 // If a file contains all the contents of the snapshot, with just some additional content at the end,
 // it will still be considered equal, the extra content will be truncated.
 func (res *Restorer) compareFile(target string, node *restic.Node) (map[int64]struct{}, int64, bool, error) {
+	// skip small files
+	if node.Size < 2*chunker.MinSize {
+		return nil, 0, false, nil
+	}
+
+	yes, _ := strconv.ParseBool(os.Getenv("RESTIC_COMPARE_BY_CHUNK"))
+	if yes {
+		return res.compareFileByChunk(target, node)
+	}
+
 	f, err := os.Open(target)
 	if err != nil {
 		return nil, 0, false, err
@@ -572,6 +583,95 @@ func (res *Restorer) compareFile(target string, node *restic.Node) (map[int64]st
 	}
 
 	return existingBlobs, currentSize, equal, nil
+}
+
+func (res *Restorer) compareFileByChunk(target string, node *restic.Node) (map[int64]struct{}, int64, bool, error) {
+	f, err := os.Open(target)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	// TODO: store the offset mapping in Node
+	var offset int64
+	offsetByBlobID := make(map[restic.ID][]int64)
+	for _, blobID := range node.Content {
+		length, found := res.repo.LookupBlobSize(blobID, restic.DataBlob)
+		if !found {
+			return nil, 0, false, errors.Errorf("Unable to fetch blob %s", blobID)
+		}
+
+		offsetByBlobID[blobID] = append(offsetByBlobID[blobID], offset)
+		offset += int64(length)
+	}
+
+	tmpFile, err := os.CreateTemp("", "restic-")
+	if err != nil {
+		return nil, 0, false, err
+	}
+
+	defer func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpFile.Name())
+	}()
+
+	currentSize := int64(node.Size)
+
+	err = fs.PreallocateFile(tmpFile, currentSize)
+	if err != nil {
+		// Just log the preallocate error but don't let it cause the restore process to fail.
+		// Preallocate might return an error if the filesystem (implementation) does not
+		// support preallocation or our parameters combination to the preallocate call
+		// This should yield a syscall.ENOTSUP error, but some other errors might also
+		// show up.
+		debug.Log("Failed to preallocate %v with size %v: %v", tmpFile.Name(), currentSize, err)
+	}
+
+	existingBlobs := make(map[int64]struct{})
+
+	pol := res.repo.Config().ChunkerPolynomial
+	ck := chunker.New(f, pol)
+	buf := make([]byte, chunker.MaxSize)
+	for {
+		chunk, err := ck.Next(buf)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, 0, false, err
+		}
+
+		offsets, ok := offsetByBlobID[restic.Hash(chunk.Data)]
+		if ok {
+			for _, offset1 := range offsets {
+				existingBlobs[offset1] = struct{}{}
+				_, err = tmpFile.WriteAt(chunk.Data, offset1)
+				if err != nil {
+					return nil, 0, false, err
+				}
+			}
+		}
+	}
+
+	err = tmpFile.Close()
+	if err != nil {
+		return nil, 0, false, err
+	}
+
+	err = f.Close()
+	if err != nil {
+		return nil, 0, false, err
+	}
+
+	// move tmpFile to target
+	err = os.Rename(tmpFile.Name(), target)
+	if err != nil {
+		return nil, 0, false, err
+	}
+
+	return existingBlobs, currentSize, len(existingBlobs) == len(node.Content), nil
 }
 
 func isFileChanged(currentFile existingFileInfo, node *restic.Node) bool {
