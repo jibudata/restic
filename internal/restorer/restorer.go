@@ -10,12 +10,12 @@ import (
 	"sync/atomic"
 
 	"github.com/restic/chunker"
+	internalchunker "github.com/restic/restic/internal/chunker"
 	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/fs"
 	"github.com/restic/restic/internal/restic"
 	restoreui "github.com/restic/restic/internal/ui/restore"
-
 	"golang.org/x/sync/errgroup"
 )
 
@@ -27,6 +27,7 @@ type Restorer struct {
 	skipExisting     bool
 	reChunk          bool
 	quickChangeCheck bool
+	fileChunkInfos   *internalchunker.FileChunkInfos
 
 	progress *restoreui.Progress
 
@@ -53,6 +54,12 @@ func WithReChunk(reChunk bool) Option {
 func WithQuickChangeCheck(quickChangeCheck bool) Option {
 	return func(r *Restorer) {
 		r.quickChangeCheck = quickChangeCheck
+	}
+}
+
+func WithFileChunkInfos(fileChunkInfos *internalchunker.FileChunkInfos) Option {
+	return func(r *Restorer) {
+		r.fileChunkInfos = fileChunkInfos
 	}
 }
 
@@ -560,6 +567,10 @@ func (res *Restorer) compareFile(target string, node *restic.Node) (map[int64]st
 		return nil, 0, false, nil
 	}
 
+	if res.fileChunkInfos != nil {
+		return res.compareFileByLocalChunkFile(target, node)
+	}
+
 	if res.reChunk {
 		return res.compareFileByChunk(target, node)
 	}
@@ -631,14 +642,14 @@ func (res *Restorer) compareFileByChunk(target string, node *restic.Node) (map[i
 
 	// TODO: store the offset mapping in Node
 	var offset int64
-	offsetByBlobID := make(map[restic.ID][]int64)
+	offsetsByBlobID := make(map[restic.ID][]int64)
 	for _, blobID := range node.Content {
 		length, found := res.repo.LookupBlobSize(blobID, restic.DataBlob)
 		if !found {
 			return nil, 0, false, errors.Errorf("Unable to fetch blob %s", blobID)
 		}
 
-		offsetByBlobID[blobID] = append(offsetByBlobID[blobID], offset)
+		offsetsByBlobID[blobID] = append(offsetsByBlobID[blobID], offset)
 		offset += int64(length)
 	}
 
@@ -678,7 +689,7 @@ func (res *Restorer) compareFileByChunk(target string, node *restic.Node) (map[i
 			return nil, 0, false, err
 		}
 
-		offsets, ok := offsetByBlobID[restic.Hash(chunk.Data)]
+		offsets, ok := offsetsByBlobID[restic.Hash(chunk.Data)]
 		if ok {
 			for _, offset1 := range offsets {
 				existingBlobs[offset1] = struct{}{}
@@ -707,6 +718,138 @@ func (res *Restorer) compareFileByChunk(target string, node *restic.Node) (map[i
 	}
 
 	return existingBlobs, currentSize, len(existingBlobs) == len(node.Content), nil
+}
+
+func (res *Restorer) compareFileByLocalChunkFile(target string, node *restic.Node) (map[int64]struct{}, int64, bool, error) {
+	fileChunkInfos := *res.fileChunkInfos
+	fileChunks := fileChunkInfos[target]
+	if fileChunks == nil {
+		return nil, 0, false, nil
+	}
+
+	var offset int64
+	existingOffsetsByBlobID := make(map[restic.ID][]int64)
+	existingBlobs := make(map[int64]struct{})
+	var snapshotOffsets []int64
+	for _, blobID := range node.Content {
+		length, found := res.repo.LookupBlobSize(blobID, restic.DataBlob)
+		if !found {
+			return nil, 0, false, errors.Errorf("Unable to fetch blob %s", blobID)
+		}
+
+		_, ok := fileChunks.Chunks[blobID]
+		if ok {
+			existingOffsetsByBlobID[blobID] = append(existingOffsetsByBlobID[blobID], offset)
+			existingBlobs[offset] = struct{}{}
+		}
+
+		snapshotOffsets = append(snapshotOffsets, offset)
+		offset += int64(length)
+	}
+
+	if len(existingBlobs) == 0 {
+		return nil, 0, false, nil
+	}
+
+	currentSize := fileChunks.Size
+
+	// if offsets are equal, we can reuse the blobs in the current file directly
+	if offsetsEqual(fileChunks.OffSets, snapshotOffsets) {
+		equal := len(existingBlobs) == len(node.Content)
+		if equal {
+			// equal files with be skipped in restore, so if file size > snapshot file size, truncate it in advance.
+			if currentSize > int64(node.Size) {
+				err := os.Truncate(target, int64(node.Size))
+				if err != nil {
+					return nil, 0, false, err
+				}
+			}
+		}
+
+		return existingBlobs, currentSize, equal, nil
+	}
+
+	f, err := os.Open(target)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	tmpFile, err := os.CreateTemp("", "restic-")
+	if err != nil {
+		return nil, 0, false, err
+	}
+
+	defer func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpFile.Name())
+	}()
+
+	err = fs.PreallocateFile(tmpFile, currentSize)
+	if err != nil {
+		// Just log the preallocate error but don't let it cause the restore process to fail.
+		// Preallocate might return an error if the filesystem (implementation) does not
+		// support preallocation or our parameters combination to the preallocate call
+		// This should yield a syscall.ENOTSUP error, but some other errors might also
+		// show up.
+		debug.Log("Failed to preallocate %v with size %v: %v", tmpFile.Name(), currentSize, err)
+	}
+
+	buf := make([]byte, chunker.MaxSize)
+	for bid, offsets := range existingOffsetsByBlobID {
+		ci := fileChunks.Chunks[bid]
+		buf = buf[:ci.Length]
+		_, err = f.ReadAt(buf, ci.Offset)
+		if err != nil {
+			return nil, 0, false, err
+		}
+
+		for _, offset1 := range offsets {
+			_, err = tmpFile.WriteAt(buf, offset1)
+			if err != nil {
+				return nil, 0, false, err
+			}
+		}
+	}
+
+	err = tmpFile.Close()
+	if err != nil {
+		return nil, 0, false, err
+	}
+
+	err = f.Close()
+	if err != nil {
+		return nil, 0, false, err
+	}
+
+	// move tmpFile to target
+	err = os.Rename(tmpFile.Name(), target)
+	if err != nil {
+		return nil, 0, false, err
+	}
+
+	return existingBlobs, currentSize, len(existingBlobs) == len(node.Content), nil
+}
+
+func offsetsEqual(localOffsets, snapshotOffsets []int64) bool {
+	var short, long []int64
+	if len(localOffsets) < len(snapshotOffsets) {
+		short = localOffsets
+		long = snapshotOffsets
+	} else {
+		short = snapshotOffsets
+		long = localOffsets
+	}
+
+	for i, offset := range short {
+		if offset != long[i] {
+			return false
+		}
+	}
+
+	return true
 }
 
 // fileChanged tries to detect whether a file's content has changed compared
