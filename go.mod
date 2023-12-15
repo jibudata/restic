@@ -10,6 +10,7 @@ require (
 	github.com/cenkalti/backoff/v4 v4.2.1
 	github.com/cespare/xxhash/v2 v2.2.0
 	github.com/elithrar/simple-scrypt v1.3.0
+	github.com/fsnotify/fsnotify v1.7.0
 	github.com/go-ole/go-ole v1.3.0
 	github.com/google/go-cmp v0.6.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
@@ -34,6 +35,7 @@ require (
 	golang.org/x/text v0.13.0
 	golang.org/x/time v0.3.0
 	google.golang.org/api v0.148.0
+	gopkg.in/yaml.v2 v2.4.0
 )
 
 require (
