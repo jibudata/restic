@@ -74,8 +74,11 @@ type RestoreOptions struct {
 	InsensitiveInclude []string
 	Target             string
 	restic.SnapshotFilter
-	Sparse bool
-	Verify bool
+	Sparse           bool
+	Verify           bool
+	SkipExisting     bool
+	ReChunk          bool
+	QuickChangeCheck bool
 }
 
 var restoreOptions RestoreOptions
@@ -93,6 +96,9 @@ func init() {
 	initSingleSnapshotFilter(flags, &restoreOptions.SnapshotFilter)
 	flags.BoolVar(&restoreOptions.Sparse, "sparse", false, "restore files as sparse")
 	flags.BoolVar(&restoreOptions.Verify, "verify", false, "verify restored files content")
+	flags.BoolVar(&restoreOptions.SkipExisting, "skip-existing", false, "skip restoring file blobs that exist on disk")
+	flags.BoolVar(&restoreOptions.ReChunk, "rechunk", false, "divide files on disk into chunks and compare these chunks with corresponding chunks from the same file in the snapshot. If this flag is not set, the chunk sizes from the snapshot files will be used to divide the files on disk for comparison. It should be used together with --skip-existing")
+	flags.BoolVar(&restoreOptions.QuickChangeCheck, "quick-change-check", false, "check if file has changed by comparing size and mtime, it should be used together with --skip-existing")
 }
 
 func runRestore(ctx context.Context, opts RestoreOptions, gopts GlobalOptions,
@@ -193,7 +199,11 @@ func runRestore(ctx context.Context, opts RestoreOptions, gopts GlobalOptions,
 	}
 
 	progress := restoreui.NewProgress(printer, calculateProgressInterval(!gopts.Quiet, gopts.JSON))
-	res := restorer.NewRestorer(repo, sn, opts.Sparse, progress)
+	res := restorer.NewRestorer(repo, sn, opts.Sparse, progress,
+		restorer.WithSkipExisting(opts.SkipExisting),
+		restorer.WithReChunk(opts.ReChunk),
+		restorer.WithQuickChangeCheck(opts.QuickChangeCheck),
+	)
 
 	totalErrors := 0
 	res.Error = func(location string, err error) error {

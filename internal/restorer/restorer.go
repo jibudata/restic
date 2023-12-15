@@ -2,10 +2,14 @@ package restorer
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 
+	"github.com/restic/chunker"
 	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/fs"
@@ -17,9 +21,12 @@ import (
 
 // Restorer is used to restore a snapshot to a directory.
 type Restorer struct {
-	repo   restic.Repository
-	sn     *restic.Snapshot
-	sparse bool
+	repo             restic.Repository
+	sn               *restic.Snapshot
+	sparse           bool
+	skipExisting     bool
+	reChunk          bool
+	quickChangeCheck bool
 
 	progress *restoreui.Progress
 
@@ -29,9 +36,30 @@ type Restorer struct {
 
 var restorerAbortOnAllErrors = func(location string, err error) error { return err }
 
+type Option func(*Restorer)
+
+func WithSkipExisting(skipExisting bool) Option {
+	return func(r *Restorer) {
+		r.skipExisting = skipExisting
+	}
+}
+
+func WithReChunk(reChunk bool) Option {
+	return func(r *Restorer) {
+		r.reChunk = reChunk
+	}
+}
+
+func WithQuickChangeCheck(quickChangeCheck bool) Option {
+	return func(r *Restorer) {
+		r.quickChangeCheck = quickChangeCheck
+	}
+}
+
 // NewRestorer creates a restorer preloaded with the content from the snapshot id.
 func NewRestorer(repo restic.Repository, sn *restic.Snapshot, sparse bool,
-	progress *restoreui.Progress) *Restorer {
+	progress *restoreui.Progress, options ...Option) *Restorer {
+
 	r := &Restorer{
 		repo:         repo,
 		sparse:       sparse,
@@ -39,6 +67,25 @@ func NewRestorer(repo restic.Repository, sn *restic.Snapshot, sparse bool,
 		SelectFilter: func(string, string, *restic.Node) (bool, bool) { return true, true },
 		progress:     progress,
 		sn:           sn,
+	}
+
+	for _, option := range options {
+		option(r)
+	}
+
+	yes, err := strconv.ParseBool(os.Getenv("RESTIC_RECHUNK"))
+	if err == nil {
+		r.reChunk = yes
+	}
+
+	yes, err = strconv.ParseBool(os.Getenv("RESTIC_QUICK_CHANGE_CHECK"))
+	if err == nil {
+		r.quickChangeCheck = yes
+	}
+
+	yes, err = strconv.ParseBool(os.Getenv("RESTIC_SKIP_EXISTING"))
+	if err == nil {
+		r.skipExisting = yes
 	}
 
 	return r
@@ -230,6 +277,22 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) error {
 		}
 	}
 
+	currentFiles := make(map[string]existingFileInfo)
+	err = filepath.Walk(dst, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if path == dst {
+			return nil
+		}
+		currentFiles[path] = existingFileInfo{location: path, info: info}
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return errors.Wrap(err, "Failed to get current files")
+	}
+
 	idx := NewHardlinkIndex()
 	filerestorer := newFileRestorer(dst, res.repo.Backend().Load, res.repo.Key(), res.repo.Index().Lookup,
 		res.repo.Connections(), res.sparse, res.progress)
@@ -244,6 +307,9 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) error {
 			if res.progress != nil {
 				res.progress.AddFile(0)
 			}
+
+			defer delete(currentFiles, target)
+
 			// create dir with default permissions
 			// #leaveDir restores dir metadata after visiting all children
 			return fs.MkdirAll(target, 0700)
@@ -251,6 +317,9 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) error {
 
 		visitNode: func(node *restic.Node, target, location string) error {
 			debug.Log("first pass, visitNode: mkdir %q, leaveDir on second pass should restore metadata", location)
+
+			defer delete(currentFiles, target)
+
 			// create parent dir with default permissions
 			// second pass #leaveDir restores dir metadata after visiting/restoring all children
 			err := fs.MkdirAll(filepath.Dir(target), 0700)
@@ -287,13 +356,42 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) error {
 				res.progress.AddFile(node.Size)
 			}
 
-			filerestorer.addFile(location, node.Content, int64(node.Size))
+			currentFile, ok := currentFiles[target]
+			if !ok || res.sparse || !res.skipExisting {
+				fmt.Printf("DEBUG: Adding new file, location: %s, target: %s\n", location, target)
+				filerestorer.addNewFile(location, node.Content, int64(node.Size))
+			} else if fileChanged(currentFile.info, node, res.quickChangeCheck) {
+				existingBlobs, currentSize, equalFile, err := res.compareFile(target, node)
+				if err != nil {
+					fmt.Printf("DEBUG: Failed to process file %s, err: %s\n", target, err)
+					return err
+				}
+
+				if !equalFile {
+					fmt.Printf("DEBUG: Adding modified file with existing blobs %v, location: %s, target: %s\n", existingBlobs, location, target)
+					filerestorer.addModifiedFilesFile(location, node.Content, int64(node.Size), currentSize, existingBlobs)
+				} else {
+					fmt.Printf("DEBUG: Found unchanged file after comparing, skip restoring, location: %s, target: %s\n", location, target)
+				}
+			} else {
+				fmt.Printf("DEBUG: Found unchanged file, skip restoring, location: %s, target: %s\n", location, target)
+			}
 
 			return nil
 		},
 	})
 	if err != nil {
 		return err
+	}
+
+	for target := range currentFiles {
+		location, err := filepath.Rel(dst, target)
+		if err != nil {
+			fmt.Printf("DEBUG: Failed to find relative path, :%s\n", err)
+			return err
+		}
+		fmt.Printf("DEBUG: Adding stale file, location: %s, target: %s\n", location, target)
+		filerestorer.addStaleFilesFile(location)
 	}
 
 	err = filerestorer.restoreFiles(ctx)
@@ -449,4 +547,187 @@ func (res *Restorer) verifyFile(target string, node *restic.Node, buf []byte) ([
 	}
 
 	return buf, nil
+}
+
+// compareFile compares the current file blob hash between the one in node one by one, and returns the equal ones.
+// It also returns a bool value to indicate if the current file is equal to the file in snapshot.
+// Note:
+// If a file contains all the contents of the snapshot, with just some additional content at the end,
+// it will still be considered equal, the extra content will be truncated.
+func (res *Restorer) compareFile(target string, node *restic.Node) (map[int64]struct{}, int64, bool, error) {
+	// skip small files
+	if node.Size < 2*chunker.MinSize {
+		return nil, 0, false, nil
+	}
+
+	if res.reChunk {
+		return res.compareFileByChunk(target, node)
+	}
+
+	f, err := os.Open(target)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, 0, false, err
+	}
+
+	existingBlobs := make(map[int64]struct{})
+
+	var offset int64
+	var buf []byte
+	for _, blobID := range node.Content {
+		length, found := res.repo.LookupBlobSize(blobID, restic.DataBlob)
+		if !found {
+			return nil, 0, false, errors.Errorf("Unable to fetch blob %s", blobID)
+		}
+
+		if length > uint(cap(buf)) {
+			buf = make([]byte, 2*length)
+		}
+		buf = buf[:length]
+
+		_, err = f.ReadAt(buf, offset)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, 0, false, err
+		}
+		if blobID.Equal(restic.Hash(buf)) {
+			existingBlobs[offset] = struct{}{}
+		}
+		offset += int64(length)
+	}
+
+	equal := len(existingBlobs) == len(node.Content)
+	currentSize := fi.Size()
+	if equal {
+		// equal files with be skipped in restore, so if file size > snapshot file size, truncate it in advance.
+		if currentSize > int64(node.Size) {
+			err = f.Truncate(int64(node.Size))
+			if err != nil {
+				return nil, 0, false, err
+			}
+		}
+	}
+
+	return existingBlobs, currentSize, equal, nil
+}
+
+func (res *Restorer) compareFileByChunk(target string, node *restic.Node) (map[int64]struct{}, int64, bool, error) {
+	f, err := os.Open(target)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	// TODO: store the offset mapping in Node
+	var offset int64
+	offsetByBlobID := make(map[restic.ID][]int64)
+	for _, blobID := range node.Content {
+		length, found := res.repo.LookupBlobSize(blobID, restic.DataBlob)
+		if !found {
+			return nil, 0, false, errors.Errorf("Unable to fetch blob %s", blobID)
+		}
+
+		offsetByBlobID[blobID] = append(offsetByBlobID[blobID], offset)
+		offset += int64(length)
+	}
+
+	tmpFile, err := os.CreateTemp("", "restic-")
+	if err != nil {
+		return nil, 0, false, err
+	}
+
+	defer func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpFile.Name())
+	}()
+
+	currentSize := int64(node.Size)
+
+	err = fs.PreallocateFile(tmpFile, currentSize)
+	if err != nil {
+		// Just log the preallocate error but don't let it cause the restore process to fail.
+		// Preallocate might return an error if the filesystem (implementation) does not
+		// support preallocation or our parameters combination to the preallocate call
+		// This should yield a syscall.ENOTSUP error, but some other errors might also
+		// show up.
+		debug.Log("Failed to preallocate %v with size %v: %v", tmpFile.Name(), currentSize, err)
+	}
+
+	existingBlobs := make(map[int64]struct{})
+
+	pol := res.repo.Config().ChunkerPolynomial
+	ck := chunker.New(f, pol)
+	buf := make([]byte, chunker.MaxSize)
+	for {
+		chunk, err := ck.Next(buf)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, 0, false, err
+		}
+
+		offsets, ok := offsetByBlobID[restic.Hash(chunk.Data)]
+		if ok {
+			for _, offset1 := range offsets {
+				existingBlobs[offset1] = struct{}{}
+				_, err = tmpFile.WriteAt(chunk.Data, offset1)
+				if err != nil {
+					return nil, 0, false, err
+				}
+			}
+		}
+	}
+
+	err = tmpFile.Close()
+	if err != nil {
+		return nil, 0, false, err
+	}
+
+	err = f.Close()
+	if err != nil {
+		return nil, 0, false, err
+	}
+
+	// move tmpFile to target
+	err = os.Rename(tmpFile.Name(), target)
+	if err != nil {
+		return nil, 0, false, err
+	}
+
+	return existingBlobs, currentSize, len(existingBlobs) == len(node.Content), nil
+}
+
+// fileChanged tries to detect whether a file's content has changed compared
+// to the contents of the node, which describes the same path in the snapshot.
+// It should only be run for regular files.
+func fileChanged(fi os.FileInfo, node *restic.Node, quickChangeCheck bool) bool {
+	if !quickChangeCheck {
+		return true
+	}
+
+	switch {
+	case node == nil:
+		return true
+	case node.Type != "file":
+		// We're only called for regular files, so this is a type change.
+		return true
+	case uint64(fi.Size()) != node.Size:
+		return true
+	case !fi.ModTime().Equal(node.ModTime):
+		return true
+	}
+
+	return false
 }
