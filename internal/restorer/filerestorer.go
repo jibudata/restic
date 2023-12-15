@@ -69,7 +69,6 @@ type fileRestorer struct {
 
 	dst           string
 	files         []*fileInfo
-	newFiles      []*fileInfo
 	staleFiles    []*fileInfo
 	modifiedFiles []*fileInfo
 	Error         func(string, error) error
@@ -105,7 +104,7 @@ func (r *fileRestorer) addStaleFilesFile(location string) {
 }
 
 func (r *fileRestorer) addNewFile(location string, content restic.IDs, size int64) {
-	r.newFiles = append(r.newFiles, &fileInfo{location: location, blobs: content, size: size})
+	r.files = append(r.files, &fileInfo{location: location, blobs: content, size: size})
 }
 
 func (r *fileRestorer) addModifiedFilesFile(location string, content restic.IDs, size, currentSize int64, existingBlobs map[int64]struct{}) {
@@ -158,7 +157,7 @@ func (r *fileRestorer) restoreFiles(ctx context.Context) error {
 	var packOrder restic.IDs
 
 	// create packInfo from fileInfo
-	for _, file := range append(r.newFiles, r.modifiedFiles...) {
+	for _, file := range append(r.files, r.modifiedFiles...) {
 		fileBlobs := file.blobs.(restic.IDs)
 		largeFile := len(fileBlobs) > largeFileBlobCount
 		var packsMap map[restic.ID][]fileBlobInfo

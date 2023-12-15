@@ -199,7 +199,11 @@ func runRestore(ctx context.Context, opts RestoreOptions, gopts GlobalOptions,
 	}
 
 	progress := restoreui.NewProgress(printer, calculateProgressInterval(!gopts.Quiet, gopts.JSON))
-	res := restorer.NewRestorer(repo, sn, opts.Sparse, opts.SkipExisting, opts.ReChunk, opts.QuickChangeCheck, progress)
+	res := restorer.NewRestorer(repo, sn, opts.Sparse, progress,
+		restorer.WithSkipExisting(opts.SkipExisting),
+		restorer.WithReChunk(opts.ReChunk),
+		restorer.WithQuickChangeCheck(opts.QuickChangeCheck),
+	)
 
 	totalErrors := 0
 	res.Error = func(location string, err error) error {

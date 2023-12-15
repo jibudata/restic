@@ -36,35 +36,56 @@ type Restorer struct {
 
 var restorerAbortOnAllErrors = func(location string, err error) error { return err }
 
+type Option func(*Restorer)
+
+func WithSkipExisting(skipExisting bool) Option {
+	return func(r *Restorer) {
+		r.skipExisting = skipExisting
+	}
+}
+
+func WithReChunk(reChunk bool) Option {
+	return func(r *Restorer) {
+		r.reChunk = reChunk
+	}
+}
+
+func WithQuickChangeCheck(quickChangeCheck bool) Option {
+	return func(r *Restorer) {
+		r.quickChangeCheck = quickChangeCheck
+	}
+}
+
 // NewRestorer creates a restorer preloaded with the content from the snapshot id.
-func NewRestorer(repo restic.Repository, sn *restic.Snapshot, sparse, skipExisting, rechunk, quickChangeCheck bool,
-	progress *restoreui.Progress) *Restorer {
+func NewRestorer(repo restic.Repository, sn *restic.Snapshot, sparse bool,
+	progress *restoreui.Progress, options ...Option) *Restorer {
+
+	r := &Restorer{
+		repo:         repo,
+		sparse:       sparse,
+		Error:        restorerAbortOnAllErrors,
+		SelectFilter: func(string, string, *restic.Node) (bool, bool) { return true, true },
+		progress:     progress,
+		sn:           sn,
+	}
+
+	for _, option := range options {
+		option(r)
+	}
 
 	yes, err := strconv.ParseBool(os.Getenv("RESTIC_RECHUNK"))
 	if err == nil {
-		rechunk = yes
+		r.reChunk = yes
 	}
 
 	yes, err = strconv.ParseBool(os.Getenv("RESTIC_QUICK_CHANGE_CHECK"))
 	if err == nil {
-		quickChangeCheck = yes
+		r.quickChangeCheck = yes
 	}
 
 	yes, err = strconv.ParseBool(os.Getenv("RESTIC_SKIP_EXISTING"))
 	if err == nil {
-		skipExisting = yes
-	}
-
-	r := &Restorer{
-		repo:             repo,
-		sparse:           sparse,
-		Error:            restorerAbortOnAllErrors,
-		SelectFilter:     func(string, string, *restic.Node) (bool, bool) { return true, true },
-		progress:         progress,
-		sn:               sn,
-		skipExisting:     skipExisting,
-		reChunk:          rechunk,
-		quickChangeCheck: quickChangeCheck,
+		r.skipExisting = yes
 	}
 
 	return r
