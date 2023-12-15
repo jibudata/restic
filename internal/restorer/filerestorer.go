@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -30,7 +29,7 @@ const (
 // information about existing file
 type existingFileInfo struct {
 	location string
-	modTime  time.Time
+	info     os.FileInfo
 }
 
 // information about regular file being restored
