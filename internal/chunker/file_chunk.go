@@ -9,6 +9,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/restic/chunker"
+	"github.com/restic/restic/internal/crypto"
 	"github.com/restic/restic/internal/restic"
 	"golang.org/x/sync/errgroup"
 	"gopkg.in/yaml.v3"
@@ -35,6 +36,9 @@ func CalculateAllFileChunks(ctx context.Context, repo restic.Repository, target 
 	}
 
 	pol := repo.Config().ChunkerPolynomial
+	key := repo.Key()
+	// create one chunker which is reused for each file (because it contains a rather large buffer)
+	ck := chunker.New(nil, pol)
 	fileChunkInfos := make(FileChunkInfoMap)
 	err = filepath.Walk(target, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -45,7 +49,7 @@ func CalculateAllFileChunks(ctx context.Context, repo restic.Repository, target 
 			return watcher.Add(path)
 		}
 
-		fci, err := calculateFileChunks(ctx, pol, path, info)
+		fci, err := calculateFileChunks(ctx, ck, pol, path, info)
 		if err != nil {
 			return err
 		}
@@ -60,12 +64,7 @@ func CalculateAllFileChunks(ctx context.Context, repo restic.Repository, target 
 		return err
 	}
 
-	data, err := yaml.Marshal(fileChunkInfos)
-	if err != nil {
-		return err
-	}
-
-	err = os.WriteFile("/tmp/file_chunks.yaml", data, 0644)
+	err = SaveFileChunks("/tmp/file_chunks.yaml", key, fileChunkInfos)
 	if err != nil {
 		return err
 	}
@@ -92,13 +91,13 @@ func CalculateAllFileChunks(ctx context.Context, repo restic.Repository, target 
 						return err
 					}
 
-					err = updateFileChunks(ctx, pol, event.Name, fileInfo, false)
+					err = updateFileChunks(ctx, event.Name, fileInfo, false, ck, pol, key)
 					if err != nil {
 						fmt.Printf("DEBUG: can not update file %s: %v\n", event.Name, err)
 						return err
 					}
 				} else if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-					err = updateFileChunks(ctx, pol, event.Name, nil, true)
+					err = updateFileChunks(ctx, event.Name, nil, true, ck, pol, key)
 					if err != nil {
 						fmt.Printf("DEBUG: can not update file %s: %v\n", event.Name, err)
 						return err
@@ -120,7 +119,7 @@ func CalculateAllFileChunks(ctx context.Context, repo restic.Repository, target 
 	return err
 }
 
-func updateFileChunks(ctx context.Context, pol chunker.Pol, name string, info os.FileInfo, deleted bool) error {
+func updateFileChunks(ctx context.Context, name string, info os.FileInfo, deleted bool, ck *chunker.Chunker, pol chunker.Pol, key *crypto.Key) error {
 	fileChunkInfos := FileChunkInfoMap{}
 	data, err := os.ReadFile("/tmp/file_chunks.yaml")
 	if err != nil && !os.IsNotExist(err) {
@@ -138,7 +137,7 @@ func updateFileChunks(ctx context.Context, pol chunker.Pol, name string, info os
 		fmt.Printf("DEBUG: delete file %s\n", name)
 		delete(fileChunkInfos, name)
 	} else {
-		fci, err := calculateFileChunks(ctx, pol, name, info)
+		fci, err := calculateFileChunks(ctx, ck, pol, name, info)
 		if err != nil {
 			return err
 		}
@@ -151,20 +150,10 @@ func updateFileChunks(ctx context.Context, pol chunker.Pol, name string, info os
 		}
 	}
 
-	data, err = yaml.Marshal(fileChunkInfos)
-	if err != nil {
-		return err
-	}
-
-	err = os.WriteFile("/tmp/file_chunks.yaml", data, 0644)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return SaveFileChunks("/tmp/file_chunks.yaml", key, fileChunkInfos)
 }
 
-func calculateFileChunks(ctx context.Context, pol chunker.Pol, name string, info os.FileInfo) (*FileChunkInfo, error) {
+func calculateFileChunks(ctx context.Context, ck *chunker.Chunker, pol chunker.Pol, name string, info os.FileInfo) (*FileChunkInfo, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -192,10 +181,11 @@ func calculateFileChunks(ctx context.Context, pol chunker.Pol, name string, info
 	fileChunkInfo := &FileChunkInfo{
 		Name:   name,
 		Size:   info.Size(),
-		Chunks: make(map[restic.ID]ChunkInfo),
+		Chunks: make(map[string]ChunkInfo),
 	}
 
-	ck := chunker.New(f, pol)
+	// reuse the chunker
+	ck.Reset(f, pol)
 	buf := make([]byte, chunker.MaxSize)
 	var offset int64
 	for {
@@ -213,12 +203,11 @@ func calculateFileChunks(ctx context.Context, pol chunker.Pol, name string, info
 			return nil, err
 		}
 
-		id := restic.Hash(chunk.Data)
+		id := restic.Hash(chunk.Data).String()
 		length := int64(chunk.Length)
 		// we only record the first chunk with the same id in a file
 		if _, ok := fileChunkInfo.Chunks[id]; !ok {
 			fileChunkInfo.Chunks[id] = ChunkInfo{
-				ID:     id,
 				Length: length,
 				Offset: offset,
 			}
@@ -230,4 +219,47 @@ func calculateFileChunks(ctx context.Context, pol chunker.Pol, name string, info
 	}
 
 	return fileChunkInfo, nil
+}
+
+func ReadFileChunks(path string, key *crypto.Key) (*FileChunkInfoMap, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	} else if len(data) == 0 {
+		return &FileChunkInfoMap{}, nil
+	}
+
+	nonce, ciphertext := data[:key.NonceSize()], data[key.NonceSize():]
+	plaintext, err := key.Open(ciphertext[:0], nonce, ciphertext, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	res := &FileChunkInfoMap{}
+	err = yaml.Unmarshal(plaintext, res)
+	if err != nil {
+		return nil, err
+	}
+
+	return res, nil
+}
+
+func SaveFileChunks(path string, key *crypto.Key, fileChunkInfos FileChunkInfoMap) error {
+	if fileChunkInfos == nil {
+		return nil
+	}
+
+	data, err := yaml.Marshal(fileChunkInfos)
+	if err != nil {
+		return err
+	}
+
+	ciphertext := crypto.NewBlobBuffer(len(data))
+	ciphertext = ciphertext[:0]
+	nonce := crypto.NewRandomNonce()
+	ciphertext = append(ciphertext, nonce...)
+
+	ciphertext = key.Seal(ciphertext, nonce, data, nil)
+
+	return os.WriteFile(path, ciphertext, 0644)
 }

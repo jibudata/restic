@@ -740,7 +740,8 @@ func (res *Restorer) preprocessFileByLocalChunkFile(target string, node *restic.
 			return nil, 0, false, errors.Errorf("Unable to fetch blob %s", blobID)
 		}
 
-		_, ok := fileChunks.Chunks[blobID]
+		id := blobID.String()
+		_, ok := fileChunks.Chunks[id]
 		if ok {
 			existingOffsetsByBlobID[blobID] = append(existingOffsetsByBlobID[blobID], offset)
 			existingBlobs[offset] = struct{}{}
@@ -802,7 +803,8 @@ func (res *Restorer) preprocessFileByLocalChunkFile(target string, node *restic.
 
 	buf := make([]byte, chunker.MaxSize)
 	for bid, offsets := range existingOffsetsByBlobID {
-		ci := fileChunks.Chunks[bid]
+		id := bid.String()
+		ci := fileChunks.Chunks[id]
 		buf = buf[:ci.Length]
 		_, err = f.ReadAt(buf, ci.Offset)
 		if err != nil {

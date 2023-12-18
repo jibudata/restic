@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -16,8 +15,6 @@ import (
 	"github.com/restic/restic/internal/ui"
 	restoreui "github.com/restic/restic/internal/ui/restore"
 	"github.com/restic/restic/internal/ui/termstatus"
-	"gopkg.in/yaml.v3"
-
 	"github.com/spf13/cobra"
 )
 
@@ -205,15 +202,9 @@ func runRestore(ctx context.Context, opts RestoreOptions, gopts GlobalOptions,
 
 	var fileChunkInfos *internalchunker.FileChunkInfoMap
 	if opts.ChunkFile != "" {
-		data, err := os.ReadFile(opts.ChunkFile)
+		fileChunkInfos, err = internalchunker.ReadFileChunks(opts.ChunkFile, repo.Key())
 		if err != nil {
 			return err
-		} else if len(data) > 0 {
-			fileChunkInfos = &internalchunker.FileChunkInfoMap{}
-			err = yaml.Unmarshal(data, fileChunkInfos)
-			if err != nil {
-				return err
-			}
 		}
 	}
 

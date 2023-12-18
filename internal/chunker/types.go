@@ -1,18 +1,13 @@
 package chunker
 
-import (
-	"github.com/restic/restic/internal/restic"
-)
-
 type FileChunkInfo struct {
 	Name    string
 	Size    int64
-	Chunks  map[restic.ID]ChunkInfo
+	Chunks  map[string]ChunkInfo
 	OffSets []int64
 }
 
 type ChunkInfo struct {
-	ID     restic.ID
 	Length int64
 	Offset int64
 }
