@@ -15,12 +15,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func CalculateAllFileChunks(ctx context.Context, repo restic.Repository, target string, watch bool) error {
+func CalculateAllFileChunks(ctx context.Context, repo restic.Repository, target string, watch bool) (string, error) {
 	var err error
 	if !filepath.IsAbs(target) {
 		target, err = filepath.Abs(target)
 		if err != nil {
-			return err
+			return "", err
 		}
 	}
 
@@ -28,7 +28,7 @@ func CalculateAllFileChunks(ctx context.Context, repo restic.Repository, target 
 	if watch {
 		watcher, err = fsnotify.NewWatcher()
 		if err != nil {
-			return err
+			return "", err
 		}
 		defer func() {
 			_ = watcher.Close()
@@ -45,8 +45,11 @@ func CalculateAllFileChunks(ctx context.Context, repo restic.Repository, target 
 			return err
 		}
 
-		if info.IsDir() && watcher != nil {
-			return watcher.Add(path)
+		if info.IsDir() {
+			if watcher != nil {
+				return watcher.Add(path)
+			}
+			return nil
 		}
 
 		fci, err := calculateFileChunks(ctx, ck, pol, path, info)
@@ -61,16 +64,16 @@ func CalculateAllFileChunks(ctx context.Context, repo restic.Repository, target 
 		return nil
 	})
 	if err != nil && !os.IsNotExist(err) {
-		return err
+		return "", err
 	}
 
-	err = SaveFileChunks("/tmp/file_chunks.yaml", key, fileChunkInfos)
+	path, err := SaveFileChunks(key, fileChunkInfos)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	if !watch {
-		return nil
+		return path, nil
 	}
 
 	eg, _ := errgroup.WithContext(ctx)
@@ -91,13 +94,13 @@ func CalculateAllFileChunks(ctx context.Context, repo restic.Repository, target 
 						return err
 					}
 
-					err = updateFileChunks(ctx, event.Name, fileInfo, false, ck, pol, key)
+					err = updateFileChunks(ctx, event.Name, path, fileInfo, false, ck, pol, key)
 					if err != nil {
 						fmt.Printf("DEBUG: can not update file %s: %v\n", event.Name, err)
 						return err
 					}
 				} else if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-					err = updateFileChunks(ctx, event.Name, nil, true, ck, pol, key)
+					err = updateFileChunks(ctx, event.Name, path, nil, true, ck, pol, key)
 					if err != nil {
 						fmt.Printf("DEBUG: can not update file %s: %v\n", event.Name, err)
 						return err
@@ -116,21 +119,16 @@ func CalculateAllFileChunks(ctx context.Context, repo restic.Repository, target 
 
 	err = eg.Wait()
 
-	return err
+	return path, err
 }
 
-func updateFileChunks(ctx context.Context, name string, info os.FileInfo, deleted bool, ck *chunker.Chunker, pol chunker.Pol, key *crypto.Key) error {
+func updateFileChunks(ctx context.Context, name, chunkFile string, info os.FileInfo, deleted bool, ck *chunker.Chunker, pol chunker.Pol, key *crypto.Key) error {
 	fileChunkInfos := FileChunkInfoMap{}
-	data, err := os.ReadFile("/tmp/file_chunks.yaml")
+	fileChunkInfosPtr, err := ReadFileChunks(chunkFile, key)
 	if err != nil && !os.IsNotExist(err) {
 		return err
-	}
-
-	if len(data) > 0 {
-		err = yaml.Unmarshal(data, &fileChunkInfos)
-		if err != nil {
-			return err
-		}
+	} else if fileChunkInfosPtr != nil {
+		fileChunkInfos = *fileChunkInfosPtr
 	}
 
 	if deleted {
@@ -150,7 +148,8 @@ func updateFileChunks(ctx context.Context, name string, info os.FileInfo, delete
 		}
 	}
 
-	return SaveFileChunks("/tmp/file_chunks.yaml", key, fileChunkInfos)
+	_, err = SaveFileChunks(key, fileChunkInfos, chunkFile)
+	return err
 }
 
 func calculateFileChunks(ctx context.Context, ck *chunker.Chunker, pol chunker.Pol, name string, info os.FileInfo) (*FileChunkInfo, error) {
@@ -244,14 +243,16 @@ func ReadFileChunks(path string, key *crypto.Key) (*FileChunkInfoMap, error) {
 	return res, nil
 }
 
-func SaveFileChunks(path string, key *crypto.Key, fileChunkInfos FileChunkInfoMap) error {
+func SaveFileChunks(key *crypto.Key, fileChunkInfos FileChunkInfoMap, chunkFile ...string) (string, error) {
+	pathFormat := "/tmp/file_chunks_%s.yaml"
+
 	if fileChunkInfos == nil {
-		return nil
+		return "", nil
 	}
 
 	data, err := yaml.Marshal(fileChunkInfos)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	ciphertext := crypto.NewBlobBuffer(len(data))
@@ -261,5 +262,17 @@ func SaveFileChunks(path string, key *crypto.Key, fileChunkInfos FileChunkInfoMa
 
 	ciphertext = key.Seal(ciphertext, nonce, data, nil)
 
-	return os.WriteFile(path, ciphertext, 0644)
+	var path string
+	if len(chunkFile) > 0 {
+		path = chunkFile[0]
+	} else {
+		path = fmt.Sprintf(pathFormat, restic.Hash(ciphertext).String()[0:8])
+	}
+
+	err = os.WriteFile(path, ciphertext, 0644)
+	if err != nil {
+		return "", err
+	}
+
+	return path, nil
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 
 	internalchunker "github.com/restic/restic/internal/chunker"
 	"github.com/restic/restic/internal/errors"
@@ -13,7 +14,7 @@ var cmdChunk = &cobra.Command{
 	Short: "Calculate file chunks",
 	Long: `
 The "chunk" command calculates the chunks of all files in a directory,
-and stores the result in a yaml file in /tmp/file_chunks.yaml.
+and stores the result in a yaml file in /tmp/file_chunks_xxx.yaml.
 
 If the --watch flag is set, the command will watch the directory for
 changes, and update the file chunks accordingly.
@@ -50,10 +51,12 @@ func runChunk(ctx context.Context, opts ChunkOptions, gopts GlobalOptions) error
 		return err
 	}
 
-	err = internalchunker.CalculateAllFileChunks(ctx, repo, opts.Target, opts.Watch)
+	path, err := internalchunker.CalculateAllFileChunks(ctx, repo, opts.Target, opts.Watch)
 	if err != nil {
 		return err
 	}
+
+	fmt.Printf("File chunks are stored in %s\n", path)
 
 	return nil
 }
