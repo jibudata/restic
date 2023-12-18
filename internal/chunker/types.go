@@ -17,4 +17,4 @@ type ChunkInfo struct {
 	Offset int64
 }
 
-type FileChunkInfos map[string]*FileChunkInfo
+type FileChunkInfoMap map[string]*FileChunkInfo

@@ -103,7 +103,7 @@ func init() {
 	flags.BoolVar(&restoreOptions.SkipExisting, "skip-existing", false, "skip restoring file blobs that exist on disk")
 	flags.BoolVar(&restoreOptions.ReChunk, "rechunk", false, "divide files on disk into chunks and compare these chunks with corresponding chunks from the same file in the snapshot. If this flag is not set, the chunk sizes from the snapshot files will be used to divide the files on disk for comparison. It should be used together with --skip-existing")
 	flags.BoolVar(&restoreOptions.QuickChangeCheck, "quick-change-check", false, "check if file has changed by comparing size and mtime, it should be used together with --skip-existing")
-	flags.StringVar(&restoreOptions.ChunkFile, "chunk-file", "", "file to read file chunks from, instead of calculating them")
+	flags.StringVar(&restoreOptions.ChunkFile, "chunk-file", "", "file to read file chunks from, instead of calculating them, it should be used together with --skip-existing, and should not be used with --rechunk")
 }
 
 func runRestore(ctx context.Context, opts RestoreOptions, gopts GlobalOptions,
@@ -203,13 +203,13 @@ func runRestore(ctx context.Context, opts RestoreOptions, gopts GlobalOptions,
 		printer = restoreui.NewTextProgress(term)
 	}
 
-	var fileChunkInfos *internalchunker.FileChunkInfos
+	var fileChunkInfos *internalchunker.FileChunkInfoMap
 	if opts.ChunkFile != "" {
 		data, err := os.ReadFile(opts.ChunkFile)
 		if err != nil {
 			return err
 		} else if len(data) > 0 {
-			fileChunkInfos = &internalchunker.FileChunkInfos{}
+			fileChunkInfos = &internalchunker.FileChunkInfoMap{}
 			err = yaml.Unmarshal(data, fileChunkInfos)
 			if err != nil {
 				return err

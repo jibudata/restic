@@ -27,7 +27,7 @@ type Restorer struct {
 	skipExisting     bool
 	reChunk          bool
 	quickChangeCheck bool
-	fileChunkInfos   *internalchunker.FileChunkInfos
+	fileChunkInfos   *internalchunker.FileChunkInfoMap
 
 	progress *restoreui.Progress
 
@@ -57,7 +57,7 @@ func WithQuickChangeCheck(quickChangeCheck bool) Option {
 	}
 }
 
-func WithFileChunkInfos(fileChunkInfos *internalchunker.FileChunkInfos) Option {
+func WithFileChunkInfos(fileChunkInfos *internalchunker.FileChunkInfoMap) Option {
 	return func(r *Restorer) {
 		r.fileChunkInfos = fileChunkInfos
 	}
@@ -368,7 +368,7 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) error {
 				fmt.Printf("DEBUG: Adding new file, location: %s, target: %s\n", location, target)
 				filerestorer.addNewFile(location, node.Content, int64(node.Size))
 			} else if fileChanged(currentFile.info, node, res.quickChangeCheck) {
-				existingBlobs, currentSize, equalFile, err := res.compareFile(target, node)
+				existingBlobs, currentSize, equalFile, err := res.preprocessFile(target, node)
 				if err != nil {
 					fmt.Printf("DEBUG: Failed to process file %s, err: %s\n", target, err)
 					return err
@@ -556,23 +556,26 @@ func (res *Restorer) verifyFile(target string, node *restic.Node, buf []byte) ([
 	return buf, nil
 }
 
-// compareFile compares the current file blob hash between the one in node one by one, and returns the equal ones.
+// preprocessFile compares the current file blob hash between the one in node one by one, and returns the equal ones.
 // It also returns a bool value to indicate if the current file is equal to the file in snapshot.
+// If --chunk-file is specified, it uses the blob hashes from the chunk file instead of calculating them from the file.
+// If --rechunk is specified, it will re-chunk the file and compare the blob hashes.
+// Otherwise, the chunk sizes from the snapshot files will be used to divide the files on disk for comparison.
 // Note:
 // If a file contains all the contents of the snapshot, with just some additional content at the end,
 // it will still be considered equal, the extra content will be truncated.
-func (res *Restorer) compareFile(target string, node *restic.Node) (map[int64]struct{}, int64, bool, error) {
+func (res *Restorer) preprocessFile(target string, node *restic.Node) (map[int64]struct{}, int64, bool, error) {
 	// skip small files
 	if node.Size < 2*chunker.MinSize {
 		return nil, 0, false, nil
 	}
 
 	if res.fileChunkInfos != nil {
-		return res.compareFileByLocalChunkFile(target, node)
+		return res.preprocessFileByLocalChunkFile(target, node)
 	}
 
 	if res.reChunk {
-		return res.compareFileByChunk(target, node)
+		return res.preprocessFileByChunk(target, node)
 	}
 
 	f, err := os.Open(target)
@@ -631,7 +634,7 @@ func (res *Restorer) compareFile(target string, node *restic.Node) (map[int64]st
 	return existingBlobs, currentSize, equal, nil
 }
 
-func (res *Restorer) compareFileByChunk(target string, node *restic.Node) (map[int64]struct{}, int64, bool, error) {
+func (res *Restorer) preprocessFileByChunk(target string, node *restic.Node) (map[int64]struct{}, int64, bool, error) {
 	f, err := os.Open(target)
 	if err != nil {
 		return nil, 0, false, err
@@ -720,7 +723,7 @@ func (res *Restorer) compareFileByChunk(target string, node *restic.Node) (map[i
 	return existingBlobs, currentSize, len(existingBlobs) == len(node.Content), nil
 }
 
-func (res *Restorer) compareFileByLocalChunkFile(target string, node *restic.Node) (map[int64]struct{}, int64, bool, error) {
+func (res *Restorer) preprocessFileByLocalChunkFile(target string, node *restic.Node) (map[int64]struct{}, int64, bool, error) {
 	fileChunkInfos := *res.fileChunkInfos
 	fileChunks := fileChunkInfos[target]
 	if fileChunks == nil {

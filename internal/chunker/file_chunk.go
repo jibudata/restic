@@ -35,7 +35,7 @@ func CalculateAllFileChunks(ctx context.Context, repo restic.Repository, target 
 	}
 
 	pol := repo.Config().ChunkerPolynomial
-	fileChunkInfos := make(FileChunkInfos)
+	fileChunkInfos := make(FileChunkInfoMap)
 	err = filepath.Walk(target, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -121,7 +121,7 @@ func CalculateAllFileChunks(ctx context.Context, repo restic.Repository, target 
 }
 
 func updateFileChunks(ctx context.Context, pol chunker.Pol, name string, info os.FileInfo, deleted bool) error {
-	fileChunkInfos := FileChunkInfos{}
+	fileChunkInfos := FileChunkInfoMap{}
 	data, err := os.ReadFile("/tmp/file_chunks.yaml")
 	if err != nil && !os.IsNotExist(err) {
 		return err
