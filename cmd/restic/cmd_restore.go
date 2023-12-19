@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	internalchunker "github.com/restic/restic/internal/chunker"
 	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/filter"
@@ -14,7 +15,6 @@ import (
 	"github.com/restic/restic/internal/ui"
 	restoreui "github.com/restic/restic/internal/ui/restore"
 	"github.com/restic/restic/internal/ui/termstatus"
-
 	"github.com/spf13/cobra"
 )
 
@@ -79,6 +79,7 @@ type RestoreOptions struct {
 	SkipExisting     bool
 	ReChunk          bool
 	QuickChangeCheck bool
+	ChunkFile        string
 }
 
 var restoreOptions RestoreOptions
@@ -99,6 +100,7 @@ func init() {
 	flags.BoolVar(&restoreOptions.SkipExisting, "skip-existing", false, "skip restoring file blobs that exist on disk")
 	flags.BoolVar(&restoreOptions.ReChunk, "rechunk", false, "divide files on disk into chunks and compare these chunks with corresponding chunks from the same file in the snapshot. If this flag is not set, the chunk sizes from the snapshot files will be used to divide the files on disk for comparison. It should be used together with --skip-existing")
 	flags.BoolVar(&restoreOptions.QuickChangeCheck, "quick-change-check", false, "check if file has changed by comparing size and mtime, it should be used together with --skip-existing")
+	flags.StringVar(&restoreOptions.ChunkFile, "chunk-file", "", "file to read file chunks from, instead of calculating them, it should be used together with --skip-existing, and should not be used with --rechunk")
 }
 
 func runRestore(ctx context.Context, opts RestoreOptions, gopts GlobalOptions,
@@ -198,11 +200,20 @@ func runRestore(ctx context.Context, opts RestoreOptions, gopts GlobalOptions,
 		printer = restoreui.NewTextProgress(term)
 	}
 
+	var fileChunkInfos *internalchunker.FileChunkInfoMap
+	if opts.ChunkFile != "" {
+		fileChunkInfos, err = internalchunker.ReadFileChunks(opts.ChunkFile, repo.Key())
+		if err != nil {
+			return err
+		}
+	}
+
 	progress := restoreui.NewProgress(printer, calculateProgressInterval(!gopts.Quiet, gopts.JSON))
 	res := restorer.NewRestorer(repo, sn, opts.Sparse, progress,
 		restorer.WithSkipExisting(opts.SkipExisting),
 		restorer.WithReChunk(opts.ReChunk),
 		restorer.WithQuickChangeCheck(opts.QuickChangeCheck),
+		restorer.WithFileChunkInfoMap(fileChunkInfos),
 	)
 
 	totalErrors := 0

@@ -3,16 +3,20 @@ package restorer
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/restic/chunker"
 	"github.com/restic/restic/internal/archiver"
+	internalchunker "github.com/restic/restic/internal/chunker"
 	"github.com/restic/restic/internal/fs"
 	"github.com/restic/restic/internal/repository"
 	"github.com/restic/restic/internal/restic"
@@ -40,21 +44,51 @@ type Dir struct {
 	ModTime time.Time
 }
 
-func saveFile(t testing.TB, repo restic.Repository, node File) restic.ID {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	id, _, _, err := repo.SaveBlob(ctx, restic.DataBlob, []byte(node.Data), restic.ID{}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return id
+type fakeFileSystem struct {
+	t       testing.TB
+	repo    restic.Repository
+	buf     []byte
+	chunker *chunker.Chunker
 }
 
-func saveDir(t testing.TB, repo restic.Repository, nodes map[string]Node, inode uint64) restic.ID {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+func (fs *fakeFileSystem) saveFile(node File) []restic.ID {
+	ctx := context.TODO()
+
+	if fs.buf == nil {
+		fs.buf = make([]byte, chunker.MaxSize)
+	}
+
+	rd := strings.NewReader(node.Data)
+	if fs.chunker == nil {
+		fs.chunker = chunker.New(rd, fs.repo.Config().ChunkerPolynomial)
+	} else {
+		fs.chunker.Reset(rd, fs.repo.Config().ChunkerPolynomial)
+	}
+
+	var blobs []restic.ID
+	for {
+		chunk, err := fs.chunker.Next(fs.buf)
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			fs.t.Fatalf("unable to save chunk in repo: %v", err)
+		}
+
+		id, _, _, err := fs.repo.SaveBlob(ctx, restic.DataBlob, chunk.Data, restic.ID{}, false)
+		if err != nil {
+			fs.t.Fatalf("error saving chunk: %v", err)
+		}
+
+		blobs = append(blobs, id)
+	}
+
+	return blobs
+}
+
+func (fs *fakeFileSystem) saveDir(nodes map[string]Node, inode uint64) restic.ID {
+	ctx := context.TODO()
 
 	tree := &restic.Tree{}
 	for name, n := range nodes {
@@ -69,9 +103,9 @@ func saveDir(t testing.TB, repo restic.Repository, nodes map[string]Node, inode 
 			if lc == 0 {
 				lc = 1
 			}
-			fc := []restic.ID{}
+			var fc []restic.ID
 			if len(n.(File).Data) > 0 {
-				fc = append(fc, saveFile(t, repo, node))
+				fc = append(fc, fs.saveFile(node)...)
 			}
 			mode := node.Mode
 			if mode == 0 {
@@ -89,9 +123,9 @@ func saveDir(t testing.TB, repo restic.Repository, nodes map[string]Node, inode 
 				Inode:   fi,
 				Links:   lc,
 			})
-			rtest.OK(t, err)
+			rtest.OK(fs.t, err)
 		case Dir:
-			id := saveDir(t, repo, node.Nodes, inode)
+			id := fs.saveDir(node.Nodes, inode)
 
 			mode := node.Mode
 			if mode == 0 {
@@ -107,15 +141,15 @@ func saveDir(t testing.TB, repo restic.Repository, nodes map[string]Node, inode 
 				GID:     uint32(os.Getgid()),
 				Subtree: &id,
 			})
-			rtest.OK(t, err)
+			rtest.OK(fs.t, err)
 		default:
-			t.Fatalf("unknown node type %T", node)
+			fs.t.Fatalf("unknown node type %T", node)
 		}
 	}
 
-	id, err := restic.SaveTree(ctx, repo, tree)
+	id, err := restic.SaveTree(ctx, fs.repo, tree)
 	if err != nil {
-		t.Fatal(err)
+		fs.t.Fatal(err)
 	}
 
 	return id
@@ -125,9 +159,14 @@ func saveSnapshot(t testing.TB, repo restic.Repository, snapshot Snapshot) (*res
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	ffs := &fakeFileSystem{
+		t:    t,
+		repo: repo,
+	}
+
 	wg, wgCtx := errgroup.WithContext(ctx)
 	repo.StartPackUploader(wgCtx, wg)
-	treeID := saveDir(t, repo, snapshot.Nodes, 1000)
+	treeID := ffs.saveDir(snapshot.Nodes, 1000)
 	err := repo.Flush(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -874,4 +913,201 @@ func TestRestorerSparseFiles(t *testing.T) {
 	// file system as well as the OS.
 	t.Logf("wrote %d zeros as %d blocks, %.1f%% sparse",
 		len(zeros), blocks, 100*sparsity)
+}
+
+func TestPreprocessFile(t *testing.T) {
+	repo := repository.TestRepository(t)
+	tempDir := rtest.TempDir(t)
+
+	data := make([]byte, chunker.MaxSize+1024)
+	_, err := rand.Read(data)
+	rtest.OK(t, err)
+
+	sn, _ := saveSnapshot(t, repo, Snapshot{
+		Nodes: map[string]Node{
+			"file1": File{
+				Data: string(data),
+			},
+		},
+	})
+
+	tree, err := restic.LoadTree(context.TODO(), repo, *sn.Tree)
+	rtest.OK(t, err)
+
+	currentFile := filepath.Join(tempDir, "file1")
+	chunks := make(map[string]internalchunker.ChunkInfo)
+	var offsets []int64
+	var offset int64
+	for _, blobID := range tree.Nodes[0].Content {
+		length, found := repo.LookupBlobSize(blobID, restic.DataBlob)
+		if !found {
+			t.Errorf("Unable to fetch blob %s", blobID)
+		}
+
+		id := blobID.String()
+		chunks[id] = internalchunker.ChunkInfo{
+			Length: int64(length),
+			Offset: offset,
+		}
+		offset += int64(length)
+	}
+
+	tests := []struct {
+		name    string
+		options []Option
+	}{
+		{
+			name: "compare file by hash",
+		},
+		{
+			name:    "compare file by rechunk",
+			options: []Option{WithReChunk(true)},
+		},
+		{
+			name: "compare file by chunk file",
+			options: []Option{WithFileChunkInfoMap(&internalchunker.FileChunkInfoMap{
+				currentFile: &internalchunker.FileChunkInfo{
+					Name:    currentFile,
+					Size:    int64(len(data)),
+					Chunks:  chunks,
+					OffSets: offsets,
+				},
+			})},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := NewRestorer(repo, sn, false, nil, tt.options...)
+			err = os.WriteFile(currentFile, data, 0644)
+			rtest.OK(t, err)
+
+			_, _, equal, err := res.preprocessFile(currentFile, tree.Nodes[0])
+			rtest.OK(t, err)
+			rtest.Equals(t, true, equal)
+		})
+	}
+}
+
+func TestPreprocessFileWithChanges(t *testing.T) {
+	repo := repository.TestRepository(t)
+	tempDir := rtest.TempDir(t)
+
+	data := make([]byte, chunker.MaxSize+1024)
+	_, err := rand.Read(data)
+	rtest.OK(t, err)
+
+	sn, _ := saveSnapshot(t, repo, Snapshot{
+		Nodes: map[string]Node{
+			"file1": File{
+				Data: string(data),
+			},
+		},
+	})
+
+	tree, err := restic.LoadTree(context.TODO(), repo, *sn.Tree)
+	rtest.OK(t, err)
+
+	currentFile := filepath.Join(tempDir, "file1")
+
+	tests := []struct {
+		name          string
+		options       []Option
+		existingBlobs int
+		method        string
+		equal         bool
+	}{
+		{
+			name:          "compare file by hash, the first byte is modified",
+			method:        "modify",
+			existingBlobs: len(tree.Nodes[0].Content) - 1,
+			equal:         false,
+		},
+		{
+			name:          "compare file by hash, a new byte is added at the beginning",
+			method:        "add-beginning",
+			existingBlobs: 0,
+			equal:         false,
+		},
+		{
+			name:          "compare file by hash, the first byte is deleted",
+			method:        "remove-beginning",
+			existingBlobs: 0,
+			equal:         false,
+		},
+		{
+			name:          "compare file by hash, a new byte is added at the end",
+			method:        "add-end",
+			existingBlobs: len(tree.Nodes[0].Content),
+			equal:         true, // it is true !!
+		},
+		{
+			name:          "compare file by hash, the last byte is deleted",
+			method:        "remove-end",
+			existingBlobs: len(tree.Nodes[0].Content) - 1,
+			equal:         false,
+		},
+		{
+			name:          "compare file by rechunk, the first byte is modified",
+			options:       []Option{WithReChunk(true)},
+			method:        "modify",
+			existingBlobs: len(tree.Nodes[0].Content) - 1,
+			equal:         false,
+		},
+		{
+			name:          "compare file by rechunk, a new byte is added at the beginning",
+			options:       []Option{WithReChunk(true)},
+			method:        "add-beginning",
+			existingBlobs: len(tree.Nodes[0].Content) - 1,
+			equal:         false,
+		},
+		{
+			name:          "compare file by rechunk, the first byte is deleted",
+			options:       []Option{WithReChunk(true)},
+			method:        "remove-beginning",
+			existingBlobs: len(tree.Nodes[0].Content) - 1,
+			equal:         false,
+		},
+		{
+			name:          "compare file by rechunk, a new byte is added at the end",
+			options:       []Option{WithReChunk(true)},
+			method:        "add-end",
+			existingBlobs: len(tree.Nodes[0].Content) - 1,
+			equal:         false,
+		},
+		{
+			name:          "compare file by rechunk, the last byte is deleted",
+			options:       []Option{WithReChunk(true)},
+			method:        "remove-end",
+			existingBlobs: len(tree.Nodes[0].Content) - 1,
+			equal:         false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := NewRestorer(repo, sn, false, nil, tt.options...)
+
+			newData := slices.Clone(data)
+			switch tt.method {
+			case "modify":
+				newData[0] = newData[0] + 1
+			case "remove-beginning":
+				newData = newData[1:]
+			case "add-beginning":
+				newData = append([]byte{1}, newData...)
+			case "remove-end":
+				newData = newData[:len(newData)-1]
+			case "add-end":
+				newData = append(newData, 1)
+			}
+			err = os.WriteFile(currentFile, newData, 0644)
+			rtest.OK(t, err)
+
+			existingBlobs, _, equal, err := res.preprocessFile(currentFile, tree.Nodes[0])
+			rtest.OK(t, err)
+			rtest.Equals(t, tt.equal, equal)
+			rtest.Equals(t, tt.existingBlobs, len(existingBlobs))
+		})
+	}
 }
