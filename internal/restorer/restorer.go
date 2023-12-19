@@ -27,7 +27,7 @@ type Restorer struct {
 	skipExisting     bool
 	reChunk          bool
 	quickChangeCheck bool
-	fileChunkInfos   *internalchunker.FileChunkInfoMap
+	fileChunkInfoMap *internalchunker.FileChunkInfoMap
 
 	progress *restoreui.Progress
 
@@ -57,9 +57,9 @@ func WithQuickChangeCheck(quickChangeCheck bool) Option {
 	}
 }
 
-func WithFileChunkInfos(fileChunkInfos *internalchunker.FileChunkInfoMap) Option {
+func WithFileChunkInfoMap(fileChunkInfoMap *internalchunker.FileChunkInfoMap) Option {
 	return func(r *Restorer) {
-		r.fileChunkInfos = fileChunkInfos
+		r.fileChunkInfoMap = fileChunkInfoMap
 	}
 }
 
@@ -570,7 +570,7 @@ func (res *Restorer) preprocessFile(target string, node *restic.Node) (map[int64
 		return nil, 0, false, nil
 	}
 
-	if res.fileChunkInfos != nil {
+	if res.fileChunkInfoMap != nil {
 		return res.preprocessFileByLocalChunkFile(target, node)
 	}
 
@@ -624,7 +624,9 @@ func (res *Restorer) preprocessFile(target string, node *restic.Node) (map[int64
 	if equal {
 		// equal files with be skipped in restore, so if file size > snapshot file size, truncate it in advance.
 		if currentSize > int64(node.Size) {
-			err = f.Truncate(int64(node.Size))
+			// close the file first as it is opened in read mode
+			_ = f.Close()
+			err = os.Truncate(target, int64(node.Size))
 			if err != nil {
 				return nil, 0, false, err
 			}
@@ -724,7 +726,7 @@ func (res *Restorer) preprocessFileByChunk(target string, node *restic.Node) (ma
 }
 
 func (res *Restorer) preprocessFileByLocalChunkFile(target string, node *restic.Node) (map[int64]struct{}, int64, bool, error) {
-	fileChunkInfos := *res.fileChunkInfos
+	fileChunkInfos := *res.fileChunkInfoMap
 	fileChunks := fileChunkInfos[target]
 	if fileChunks == nil {
 		return nil, 0, false, nil

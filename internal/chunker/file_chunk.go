@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/google/uuid"
 	"github.com/restic/chunker"
 	"github.com/restic/restic/internal/crypto"
 	"github.com/restic/restic/internal/restic"
@@ -266,7 +267,7 @@ func SaveFileChunks(key *crypto.Key, fileChunkInfos FileChunkInfoMap, chunkFile 
 	if len(chunkFile) > 0 {
 		path = chunkFile[0]
 	} else {
-		path = fmt.Sprintf(pathFormat, restic.Hash(ciphertext).String()[0:8])
+		path = fmt.Sprintf(pathFormat, uuid.NewString()[:8])
 	}
 
 	err = os.WriteFile(path, ciphertext, 0644)

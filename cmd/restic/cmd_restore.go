@@ -213,7 +213,7 @@ func runRestore(ctx context.Context, opts RestoreOptions, gopts GlobalOptions,
 		restorer.WithSkipExisting(opts.SkipExisting),
 		restorer.WithReChunk(opts.ReChunk),
 		restorer.WithQuickChangeCheck(opts.QuickChangeCheck),
-		restorer.WithFileChunkInfos(fileChunkInfos),
+		restorer.WithFileChunkInfoMap(fileChunkInfos),
 	)
 
 	totalErrors := 0
